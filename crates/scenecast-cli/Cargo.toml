@@ -9,6 +9,7 @@ repository.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 scenecast-core.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 

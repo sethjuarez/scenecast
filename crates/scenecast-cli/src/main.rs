@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -5,10 +6,11 @@ use std::process::Command as ProcessCommand;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use scenecast_core::{
-    BundleManifest, Hotspot, HotspotId, InteractionTrigger, MANIFEST_FILE_NAME, Rect, Scene,
-    SceneId, Transition, TransitionFrame, TransitionKind, ValidationReport, manifest_path,
-    read_manifest, validate_referenced_files, write_manifest,
+    BundleManifest, GuideMark, GuideMarkId, GuideMarkStyle, Hotspot, HotspotId, InteractionTrigger,
+    MANIFEST_FILE_NAME, Rect, Scene, SceneId, Section, Transition, TransitionFrame, TransitionKind,
+    ValidationReport, manifest_path, read_manifest, validate_referenced_files, write_manifest,
 };
+use serde_json::json;
 use tracing::{info, instrument};
 use tracing_subscriber::EnvFilter;
 
@@ -46,6 +48,12 @@ enum Command {
         /// Optional screenshot path relative to the bundle root.
         #[arg(long)]
         screenshot: Option<String>,
+        /// Optional authored description for search, narration, and presenter surfaces.
+        #[arg(long)]
+        description: Option<String>,
+        /// Optional presenter or authoring notes.
+        #[arg(long)]
+        notes: Option<String>,
     },
     /// Add a click-through hotspot to a scene.
     AddHotspot {
@@ -74,6 +82,44 @@ enum Command {
         /// Interaction trigger for this hotspot.
         #[arg(long, value_enum, default_value_t = TriggerArg::Click)]
         trigger: TriggerArg,
+    },
+    /// Add a visible guide mark to a scene without changing navigation.
+    AddGuideMark {
+        /// Path to a .scenecast bundle directory.
+        bundle: PathBuf,
+        /// Scene that owns the guide mark.
+        scene: String,
+        /// Stable guide mark identifier unique within the source scene.
+        id: String,
+        /// Human-readable label for the guide mark.
+        label: String,
+        /// Guide mark x coordinate in source capture pixels.
+        #[arg(long)]
+        x: f32,
+        /// Guide mark y coordinate in source capture pixels.
+        #[arg(long)]
+        y: f32,
+        /// Guide mark width in source capture pixels.
+        #[arg(long)]
+        width: f32,
+        /// Guide mark height in source capture pixels.
+        #[arg(long)]
+        height: f32,
+        /// Visual style for the guide mark.
+        #[arg(long, value_enum, default_value_t = GuideMarkStyleArg::Pulse)]
+        style: GuideMarkStyleArg,
+    },
+    /// Add a table-of-contents section for a sequence of scenes.
+    AddSection {
+        /// Path to a .scenecast bundle directory.
+        bundle: PathBuf,
+        /// Stable section identifier.
+        id: String,
+        /// Human-readable section title.
+        title: String,
+        /// Comma-separated scene IDs included in this section, in playback order.
+        #[arg(long, value_delimiter = ',')]
+        scenes: Vec<String>,
     },
     /// Attach a frame-sequence transition to an existing hotspot.
     AddTransition {
@@ -142,6 +188,23 @@ impl From<TriggerArg> for InteractionTrigger {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum GuideMarkStyleArg {
+    Pulse,
+    Ring,
+    Highlight,
+}
+
+impl From<GuideMarkStyleArg> for GuideMarkStyle {
+    fn from(value: GuideMarkStyleArg) -> Self {
+        match value {
+            GuideMarkStyleArg::Pulse => GuideMarkStyle::Pulse,
+            GuideMarkStyleArg::Ring => GuideMarkStyle::Ring,
+            GuideMarkStyleArg::Highlight => GuideMarkStyle::Highlight,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     init_tracing();
     run(Cli::parse())
@@ -166,7 +229,9 @@ fn run(cli: Cli) -> Result<()> {
             id,
             title,
             screenshot,
-        } => add_scene(&bundle, id, title, screenshot),
+            description,
+            notes,
+        } => add_scene(&bundle, id, title, screenshot, description, notes),
         Command::AddHotspot {
             bundle,
             scene,
@@ -192,6 +257,35 @@ fn run(cli: Cli) -> Result<()> {
                 trigger,
             },
         ),
+        Command::AddGuideMark {
+            bundle,
+            scene,
+            id,
+            label,
+            x,
+            y,
+            width,
+            height,
+            style,
+        } => add_guide_mark(
+            &bundle,
+            AddGuideMarkArgs {
+                scene,
+                id,
+                label,
+                x,
+                y,
+                width,
+                height,
+                style,
+            },
+        ),
+        Command::AddSection {
+            bundle,
+            id,
+            title,
+            scenes,
+        } => add_section(&bundle, AddSectionArgs { id, title, scenes }),
         Command::AddTransition {
             bundle,
             scene,
@@ -296,6 +390,7 @@ fn inspect_bundle(bundle: &Path) -> Result<()> {
     println!("Title: {}", manifest.title);
     println!("Schema: {}", manifest.schema_version);
     println!("Start scene: {}", manifest.graph.start_scene);
+    println!("Sections: {}", section_count(&manifest));
     println!("Scenes: {}", manifest.graph.scenes.len());
     println!("Assets: {}", manifest.assets.len());
     println!("Warnings: {}", report.warnings.len());
@@ -331,8 +426,15 @@ fn validate_bundle(bundle: &Path) -> Result<()> {
     }
 }
 
-#[instrument(skip(id, title, screenshot), fields(bundle = %bundle.display()))]
-fn add_scene(bundle: &Path, id: String, title: String, screenshot: Option<String>) -> Result<()> {
+#[instrument(skip(id, title, screenshot, description, notes), fields(bundle = %bundle.display()))]
+fn add_scene(
+    bundle: &Path,
+    id: String,
+    title: String,
+    screenshot: Option<String>,
+    description: Option<String>,
+    notes: Option<String>,
+) -> Result<()> {
     let mut manifest = read_manifest(bundle)?;
     let id = SceneId::new(id)?;
 
@@ -341,7 +443,10 @@ fn add_scene(bundle: &Path, id: String, title: String, screenshot: Option<String
     }
 
     let before_report = manifest.validate();
-    manifest.add_scene(Scene::screenshot(id.clone(), title, screenshot));
+    let mut scene = Scene::screenshot(id.clone(), title, screenshot);
+    scene.description = description.filter(|value| !value.trim().is_empty());
+    scene.notes = notes.filter(|value| !value.trim().is_empty());
+    manifest.add_scene(scene);
     reject_introduced_errors("scene", &before_report, &manifest.validate())?;
 
     write_manifest(bundle, &manifest)?;
@@ -372,6 +477,25 @@ struct AddTransitionArgs {
     frame_duration_ms: u32,
 }
 
+#[derive(Debug)]
+struct AddGuideMarkArgs {
+    scene: String,
+    id: String,
+    label: String,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    style: GuideMarkStyleArg,
+}
+
+#[derive(Debug)]
+struct AddSectionArgs {
+    id: String,
+    title: String,
+    scenes: Vec<String>,
+}
+
 #[instrument(skip(args), fields(bundle = %bundle.display(), scene = %args.scene, hotspot = %args.id))]
 fn add_hotspot(bundle: &Path, args: AddHotspotArgs) -> Result<()> {
     let mut manifest = read_manifest(bundle)?;
@@ -390,6 +514,73 @@ fn add_hotspot(bundle: &Path, args: AddHotspotArgs) -> Result<()> {
     info!(scene_id = %scene_id, hotspot_id = %hotspot_id, "added hotspot to bundle");
 
     println!("Added hotspot {hotspot_id} to scene {scene_id}");
+    Ok(())
+}
+
+#[instrument(skip(args), fields(bundle = %bundle.display(), scene = %args.scene, guide_mark = %args.id))]
+fn add_guide_mark(bundle: &Path, args: AddGuideMarkArgs) -> Result<()> {
+    let mut manifest = read_manifest(bundle)?;
+    let scene_id = SceneId::new(args.scene)?;
+    let guide_mark_id = GuideMarkId::new(args.id)?;
+    let bounds = Rect::new(args.x, args.y, args.width, args.height);
+    let before_report = manifest.validate();
+    let scene = manifest
+        .graph
+        .scene_mut(&scene_id)
+        .ok_or_else(|| anyhow::anyhow!("scene `{scene_id}` does not exist"))?;
+
+    if scene
+        .guide_marks
+        .iter()
+        .any(|candidate| candidate.id == guide_mark_id)
+    {
+        bail!("scene `{scene_id}` already contains guide mark `{guide_mark_id}`");
+    }
+
+    let mut guide_mark = GuideMark::new(guide_mark_id.clone(), args.label, bounds);
+    guide_mark.style = args.style.into();
+    scene.guide_marks.push(guide_mark);
+    reject_introduced_errors("guide mark", &before_report, &manifest.validate())?;
+
+    write_manifest(bundle, &manifest)?;
+    info!(scene_id = %scene_id, guide_mark_id = %guide_mark_id, "added guide mark to bundle");
+
+    println!("Added guide mark {guide_mark_id} to scene {scene_id}");
+    Ok(())
+}
+
+#[instrument(skip(args), fields(bundle = %bundle.display(), section = %args.id))]
+fn add_section(bundle: &Path, args: AddSectionArgs) -> Result<()> {
+    if args.scenes.is_empty() {
+        bail!("--scenes must include at least one scene id");
+    }
+
+    let mut manifest = read_manifest(bundle)?;
+    if manifest
+        .sections
+        .iter()
+        .any(|section| section.id == args.id)
+    {
+        bail!("section `{}` already exists", args.id);
+    }
+
+    let before_report = manifest.validate();
+    let scenes = args
+        .scenes
+        .into_iter()
+        .map(SceneId::new)
+        .collect::<Result<Vec<_>, _>>()?;
+    manifest.sections.push(Section {
+        id: args.id.clone(),
+        title: args.title,
+        scenes,
+    });
+    reject_introduced_errors("section", &before_report, &manifest.validate())?;
+
+    write_manifest(bundle, &manifest)?;
+    info!(section_id = %args.id, "added section to bundle");
+
+    println!("Added section {}", args.id);
     Ok(())
 }
 
@@ -593,6 +784,11 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
             .graph
             .scenes
             .retain(|scene| scene.id.as_str() != "start");
+        manifest.sections = vec![Section {
+            id: "main".to_owned(),
+            title: "Main".to_owned(),
+            scenes: frame_scene_ids.clone(),
+        }];
     }
     manifest.graph.start_scene = frame_scene_ids[0].clone();
 
@@ -742,69 +938,7 @@ fn png_dimensions(path: &Path) -> Option<(u32, u32)> {
 }
 
 fn render_html_player(manifest: &BundleManifest) -> String {
-    let mut scenes = String::new();
-    for scene in &manifest.graph.scenes {
-        let screenshot = scene.assets.screenshot.as_deref().unwrap_or("");
-        let hotspots = scene
-            .hotspots
-            .iter()
-            .map(|hotspot| {
-                let transition = if let Some(transition) = &hotspot.transition {
-                    let kind = match transition.kind {
-                        TransitionKind::FrameSequence => "frame-sequence",
-                    };
-                    let default_duration = transition
-                        .default_frame_duration_ms
-                        .map_or_else(|| "null".to_owned(), |value| value.to_string());
-                    let frames = transition
-                        .frames
-                        .iter()
-                        .map(|frame| {
-                            let duration = frame
-                                .duration_ms
-                                .map_or_else(|| "null".to_owned(), |value| value.to_string());
-                            format!(
-                                "{{path:\"{}\",durationMs:{}}}",
-                                escape_js(&frame.path),
-                                duration
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!(
-                        "{{kind:\"{}\",defaultFrameDurationMs:{},frames:[{}]}}",
-                        kind, default_duration, frames
-                    )
-                } else {
-                    "null".to_owned()
-                };
-                let trigger = match hotspot.trigger {
-                    InteractionTrigger::Click => "click",
-                    InteractionTrigger::Scroll => "scroll",
-                };
-                format!(
-                    "{{id:\"{}\",label:\"{}\",target:\"{}\",trigger:\"{}\",x:{},y:{},width:{},height:{},transition:{}}}",
-                    escape_js(hotspot.id.as_str()),
-                    escape_js(&hotspot.label),
-                    escape_js(hotspot.target.as_str()),
-                    trigger,
-                    hotspot.bounds.x,
-                    hotspot.bounds.y,
-                    hotspot.bounds.width,
-                    hotspot.bounds.height,
-                    transition
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        scenes.push_str(&format!(
-            "\"{}\":{{title:\"{}\",screenshot:\"{}\",hotspots:[{}]}},",
-            escape_js(scene.id.as_str()),
-            escape_js(&scene.title),
-            escape_js(screenshot),
-            hotspots
-        ));
-    }
+    let player_data = render_player_data(manifest);
 
     format!(
         r#"<!doctype html>
@@ -816,23 +950,49 @@ fn render_html_player(manifest: &BundleManifest) -> String {
 <style>
 html {{ margin: 0; padding: 0; width: 100vw; height: 100vh; overflow: hidden; background: #000; }}
 body {{ margin: 0; padding: 0; width: 100vw; height: 100vh; min-width: 100vw; min-height: 100vh; overflow: hidden; background: #000; }}
-#capture {{ position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; max-width: none; max-height: none; object-fit: fill; }}
-#debug-layer {{ position: fixed; inset: 0; pointer-events: none; }}
-.hotspot-debug {{ position: absolute; border: 1px dashed rgba(0, 255, 247, 0.85); background: rgba(0, 255, 247, 0.12); color: rgba(255, 255, 255, 0.95); font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 2px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+#capture, #video-capture {{ position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; max-width: none; max-height: none; object-fit: fill; }}
+#video-capture {{ display: none; }}
+#guide-layer, #debug-layer {{ position: fixed; inset: 0; pointer-events: none; }}
+.guide-mark {{ position: absolute; border: 3px solid rgba(0, 255, 247, 0.92); border-radius: 999px; box-shadow: 0 0 0 6px rgba(0, 255, 247, 0.18), 0 0 26px rgba(0, 255, 247, 0.55); opacity: 0.95; }}
+.guide-mark[data-style="pulse"] {{ animation: scenecast-pulse 1.35s ease-in-out infinite; }}
+.guide-mark[data-style="highlight"] {{ border-radius: 12px; background: rgba(0, 255, 247, 0.14); }}
+@keyframes scenecast-pulse {{ 0%, 100% {{ transform: scale(1); opacity: 0.9; }} 50% {{ transform: scale(1.035); opacity: 0.55; }} }}
+.hotspot-debug {{ position: absolute; border: 1px dashed rgba(255, 214, 102, 0.9); background: rgba(255, 214, 102, 0.14); color: rgba(255, 255, 255, 0.95); font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 2px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+#toc-toggle {{ position: fixed; top: 16px; left: 16px; z-index: 4; border: 0; border-radius: 999px; background: rgba(18, 18, 18, 0.78); color: #fff; font: 600 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 10px 14px; backdrop-filter: blur(10px); cursor: pointer; }}
+#toc {{ position: fixed; top: 58px; left: 16px; z-index: 4; width: min(360px, calc(100vw - 32px)); max-height: calc(100vh - 76px); overflow: auto; border-radius: 16px; background: rgba(18, 18, 18, 0.88); color: #fff; font: 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 14px; box-shadow: 0 14px 48px rgba(0, 0, 0, 0.38); backdrop-filter: blur(14px); }}
+#toc[hidden] {{ display: none; }}
+.toc-title {{ margin: 0 0 10px; font-weight: 700; }}
+.toc-section {{ margin: 12px 0 6px; color: rgba(255, 255, 255, 0.72); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }}
+.toc-scene {{ display: block; width: 100%; border: 0; border-radius: 10px; background: transparent; color: inherit; text-align: left; padding: 8px 10px; cursor: pointer; }}
+.toc-scene:hover, .toc-scene[aria-current="true"] {{ background: rgba(0, 255, 247, 0.16); }}
+.sr-only {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }}
 </style>
 </head>
 <body>
 <img id="capture" alt="">
+<video id="video-capture" playsinline muted autoplay loop></video>
+<div id="guide-layer" aria-hidden="true"></div>
 <div id="debug-layer" hidden></div>
+<button id="toc-toggle" type="button" aria-expanded="false" aria-controls="toc">Scenes</button>
+<nav id="toc" hidden aria-label="Scene table of contents"></nav>
+<div id="scene-status" class="sr-only" aria-live="polite"></div>
 <script>
+const playerData = {player_data};
 const bundleBase = new URL("./", location.href);
-const startScene = "{start}";
-const scenes = {{{scenes}}};
+const startScene = playerData.startScene;
+const scenes = playerData.scenes;
+const sceneOrder = playerData.sceneOrder;
+const sections = playerData.sections;
 const image = document.getElementById("capture");
+const video = document.getElementById("video-capture");
+const guideLayer = document.getElementById("guide-layer");
 const debugLayer = document.getElementById("debug-layer");
+const tocToggle = document.getElementById("toc-toggle");
+const toc = document.getElementById("toc");
+const sceneStatus = document.getElementById("scene-status");
 const cacheKey = new URLSearchParams(location.search).get("v") || String(Date.now());
 const debugHotspots = new URLSearchParams(location.search).get("debug") === "1";
-let currentSceneId = location.hash.slice(1) || startScene;
+let currentSceneId = parseSceneFromHash() || startScene;
 let transitionRunId = 0;
 
 function sceneForCurrent() {{
@@ -858,6 +1018,7 @@ function hotspotAt(scene, clientX, clientY, trigger) {{
 }}
 
 function frameUrl(path) {{
+  if (!path) return "";
   const frame = new URL(path, bundleBase);
   frame.searchParams.set("scenecast-cache", cacheKey);
   return frame.href;
@@ -881,6 +1042,35 @@ async function playTransition(hotspot, runId) {{
   }}
 }}
 
+function routeForScene(sceneId) {{
+  for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {{
+    const screenIndex = sections[sectionIndex].scenes.indexOf(sceneId);
+    if (screenIndex >= 0) return `#/${{sectionIndex}}/${{screenIndex}}`;
+  }}
+  return `#${{sceneId}}`;
+}}
+
+function parseSceneFromHash() {{
+  const hash = location.hash.slice(1);
+  if (!hash) return null;
+  const match = hash.match(/^\/(\d+)\/(\d+)$/);
+  if (match) {{
+    const section = sections[Number(match[1])];
+    return section?.scenes?.[Number(match[2])] || null;
+  }}
+  return scenes[hash] ? hash : null;
+}}
+
+function mediaSize() {{
+  if (video.style.display !== "none" && video.videoWidth && video.videoHeight) {{
+    return {{ width: video.videoWidth, height: video.videoHeight }};
+  }}
+  return {{
+    width: image.naturalWidth || scenes[currentSceneId]?.width || window.innerWidth || 1,
+    height: image.naturalHeight || scenes[currentSceneId]?.height || window.innerHeight || 1
+  }};
+}}
+
 function renderDebugHotspots() {{
   if (!debugHotspots) return;
   debugLayer.hidden = false;
@@ -888,8 +1078,9 @@ function renderDebugHotspots() {{
   const scene = sceneForCurrent();
   if (!scene) return;
 
-  const widthScale = window.innerWidth / (image.naturalWidth || window.innerWidth || 1);
-  const heightScale = window.innerHeight / (image.naturalHeight || window.innerHeight || 1);
+  const size = mediaSize();
+  const widthScale = window.innerWidth / size.width;
+  const heightScale = window.innerHeight / size.height;
   for (const hotspot of scene.hotspots) {{
     const element = document.createElement("div");
     element.className = "hotspot-debug";
@@ -902,15 +1093,83 @@ function renderDebugHotspots() {{
   }}
 }}
 
+function renderGuideMarks() {{
+  guideLayer.replaceChildren();
+  const scene = sceneForCurrent();
+  if (!scene) return;
+  const size = mediaSize();
+  const widthScale = window.innerWidth / size.width;
+  const heightScale = window.innerHeight / size.height;
+  for (const guideMark of scene.guideMarks) {{
+    const element = document.createElement("div");
+    element.className = "guide-mark";
+    element.dataset.style = guideMark.style;
+    element.title = guideMark.label;
+    element.style.left = (guideMark.x * widthScale) + "px";
+    element.style.top = (guideMark.y * heightScale) + "px";
+    element.style.width = Math.max(1, guideMark.width * widthScale) + "px";
+    element.style.height = Math.max(1, guideMark.height * heightScale) + "px";
+    guideLayer.appendChild(element);
+  }}
+}}
+
+function renderToc() {{
+  toc.replaceChildren();
+  const title = document.createElement("p");
+  title.className = "toc-title";
+  title.textContent = playerData.title;
+  toc.appendChild(title);
+  for (const section of sections) {{
+    const heading = document.createElement("div");
+    heading.className = "toc-section";
+    heading.textContent = section.title;
+    toc.appendChild(heading);
+    for (const sceneId of section.scenes) {{
+      const scene = scenes[sceneId];
+      if (!scene) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "toc-scene";
+      button.textContent = scene.title;
+      button.setAttribute("aria-current", String(sceneId === currentSceneId));
+      button.addEventListener("click", () => {{
+        show(sceneId);
+        setTocOpen(false);
+      }});
+      toc.appendChild(button);
+    }}
+  }}
+}}
+
+function setTocOpen(open) {{
+  toc.hidden = !open;
+  tocToggle.setAttribute("aria-expanded", String(open));
+}}
+
 function show(sceneId) {{
   const scene = scenes[sceneId];
   if (!scene) return;
   currentSceneId = sceneId;
-  location.hash = sceneId;
+  const nextHash = routeForScene(sceneId);
+  if (location.hash !== nextHash) location.hash = nextHash;
+  video.pause();
+  video.removeAttribute("src");
+  video.style.display = "none";
+  image.style.display = "block";
   if (scene.screenshot) {{
     image.src = frameUrl(scene.screenshot);
   }}
+  if (scene.video) {{
+    video.src = frameUrl(scene.video);
+    video.style.display = "block";
+    image.style.display = "none";
+    void video.play();
+  }}
+  image.alt = scene.description || scene.title;
+  sceneStatus.textContent = scene.description || scene.title;
+  renderGuideMarks();
   renderDebugHotspots();
+  renderToc();
 }}
 
 async function activateHotspot(hotspot) {{
@@ -935,18 +1194,187 @@ document.body.addEventListener("wheel", (event) => {{
   void activateHotspot(hotspot);
 }}, {{ passive: false }});
 
-window.addEventListener("hashchange", () => show(location.hash.slice(1) || startScene));
-window.addEventListener("resize", renderDebugHotspots);
-image.addEventListener("load", renderDebugHotspots);
+function moveBy(offset) {{
+  const index = sceneOrder.indexOf(currentSceneId);
+  const target = sceneOrder[index + offset];
+  if (target) show(target);
+}}
+
+document.addEventListener("keydown", (event) => {{
+  if (event.target && ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(event.target.tagName)) return;
+  if (event.key === "ArrowRight" || event.key === " " || event.key === "PageDown") {{
+    event.preventDefault();
+    moveBy(1);
+  }} else if (event.key === "ArrowLeft" || event.key === "PageUp") {{
+    event.preventDefault();
+    moveBy(-1);
+  }} else if (event.key.toLowerCase() === "t") {{
+    setTocOpen(toc.hidden);
+  }} else if (event.key === "Escape") {{
+    setTocOpen(false);
+  }}
+}});
+
+tocToggle.addEventListener("click", () => setTocOpen(toc.hidden));
+window.addEventListener("hashchange", () => show(parseSceneFromHash() || startScene));
+window.addEventListener("resize", () => {{ renderGuideMarks(); renderDebugHotspots(); }});
+image.addEventListener("load", () => {{ renderGuideMarks(); renderDebugHotspots(); }});
+video.addEventListener("loadedmetadata", () => {{ renderGuideMarks(); renderDebugHotspots(); }});
+renderToc();
 show(currentSceneId);
 </script>
 </body>
 </html>
 "#,
         title = escape_html(&manifest.title),
-        start = escape_js(manifest.graph.start_scene.as_str()),
-        scenes = scenes
+        player_data = script_safe_json(&player_data)
     )
+}
+
+fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
+    let scene_order = manifest
+        .graph
+        .scenes
+        .iter()
+        .map(|scene| scene.id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let sections = export_sections(manifest, &scene_order);
+    let scenes = manifest
+        .graph
+        .scenes
+        .iter()
+        .map(|scene| {
+            let hotspots = scene
+                .hotspots
+                .iter()
+                .map(|hotspot| {
+                    let transition = hotspot.transition.as_ref().map(|transition| {
+                        let kind = match transition.kind {
+                            TransitionKind::FrameSequence => "frame-sequence",
+                        };
+                        json!({
+                            "kind": kind,
+                            "defaultFrameDurationMs": transition.default_frame_duration_ms,
+                            "frames": transition.frames.iter().map(|frame| {
+                                json!({
+                                    "path": frame.path,
+                                    "durationMs": frame.duration_ms,
+                                })
+                            }).collect::<Vec<_>>(),
+                        })
+                    });
+                    let trigger = match hotspot.trigger {
+                        InteractionTrigger::Click => "click",
+                        InteractionTrigger::Scroll => "scroll",
+                    };
+                    json!({
+                        "id": hotspot.id.as_str(),
+                        "label": hotspot.label,
+                        "target": hotspot.target.as_str(),
+                        "trigger": trigger,
+                        "x": hotspot.bounds.x,
+                        "y": hotspot.bounds.y,
+                        "width": hotspot.bounds.width,
+                        "height": hotspot.bounds.height,
+                        "transition": transition,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let guide_marks = scene
+                .guide_marks
+                .iter()
+                .map(|guide_mark| {
+                    let style = match guide_mark.style {
+                        GuideMarkStyle::Pulse => "pulse",
+                        GuideMarkStyle::Ring => "ring",
+                        GuideMarkStyle::Highlight => "highlight",
+                    };
+                    json!({
+                        "id": guide_mark.id.as_str(),
+                        "label": guide_mark.label,
+                        "style": style,
+                        "x": guide_mark.bounds.x,
+                        "y": guide_mark.bounds.y,
+                        "width": guide_mark.bounds.width,
+                        "height": guide_mark.bounds.height,
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                scene.id.as_str().to_owned(),
+                json!({
+                    "title": scene.title,
+                    "description": scene.description,
+                    "notes": scene.notes,
+                    "screenshot": scene.assets.screenshot,
+                    "video": scene.assets.video,
+                    "hotspots": hotspots,
+                    "guideMarks": guide_marks,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+
+    json!({
+        "title": manifest.title,
+        "startScene": manifest.graph.start_scene.as_str(),
+        "sceneOrder": scene_order,
+        "sections": sections,
+        "scenes": scenes,
+    })
+}
+
+fn export_sections(manifest: &BundleManifest, scene_order: &[String]) -> Vec<serde_json::Value> {
+    let mut sections = if manifest.sections.is_empty() {
+        vec![json!({
+            "id": "main",
+            "title": "Scenes",
+            "scenes": scene_order,
+        })]
+    } else {
+        manifest
+            .sections
+            .iter()
+            .map(|section| {
+                json!({
+                    "id": section.id,
+                    "title": section.title,
+                    "scenes": section
+                        .scenes
+                        .iter()
+                        .map(|scene_id| scene_id.as_str())
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let sectioned_scene_ids = manifest
+        .sections
+        .iter()
+        .flat_map(|section| section.scenes.iter().map(SceneId::as_str))
+        .collect::<HashSet<_>>();
+    let unsectioned = scene_order
+        .iter()
+        .filter(|scene_id| !sectioned_scene_ids.contains(scene_id.as_str()))
+        .collect::<Vec<_>>();
+    if !manifest.sections.is_empty() && !unsectioned.is_empty() {
+        sections.push(json!({
+            "id": "unsectioned",
+            "title": "Unsectioned",
+            "scenes": unsectioned,
+        }));
+    }
+
+    sections
+}
+
+fn section_count(manifest: &BundleManifest) -> usize {
+    if manifest.sections.is_empty() {
+        1
+    } else {
+        manifest.sections.len()
+    }
 }
 
 fn escape_html(value: &str) -> String {
@@ -957,12 +1385,10 @@ fn escape_html(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn escape_js(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
+fn script_safe_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value)
+        .expect("player data is serializable")
+        .replace("</script", "<\\/script")
 }
 
 fn reject_introduced_errors(
