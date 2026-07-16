@@ -177,6 +177,11 @@ impl BundleManifest {
             if let Some(path) = scene.assets.video.as_deref() {
                 paths.push(path);
             }
+            for hotspot in &scene.hotspots {
+                if let Some(transition) = &hotspot.transition {
+                    paths.extend(transition.frames.iter().map(|frame| frame.path.as_str()));
+                }
+            }
         }
 
         paths
@@ -392,6 +397,53 @@ impl Scene {
                     bounds: hotspot.bounds,
                 });
             }
+
+            if let Some(transition) = &hotspot.transition {
+                if transition.frames.is_empty() {
+                    report.errors.push(ValidationError::EmptyTransitionFrames {
+                        scene_id: self.id.clone(),
+                        hotspot_id: hotspot.id.clone(),
+                    });
+                }
+
+                if let Some(duration_ms) = transition.default_frame_duration_ms
+                    && duration_ms == 0
+                {
+                    report
+                        .errors
+                        .push(ValidationError::InvalidTransitionDefaultDuration {
+                            scene_id: self.id.clone(),
+                            hotspot_id: hotspot.id.clone(),
+                            duration_ms,
+                        });
+                }
+
+                for frame in &transition.frames {
+                    if let Err(reason) = validate_portable_asset_path(&frame.path) {
+                        report
+                            .errors
+                            .push(ValidationError::InvalidTransitionFramePath {
+                                scene_id: self.id.clone(),
+                                hotspot_id: hotspot.id.clone(),
+                                path: frame.path.clone(),
+                                reason,
+                            });
+                    }
+
+                    if let Some(duration_ms) = frame.duration_ms
+                        && duration_ms == 0
+                    {
+                        report
+                            .errors
+                            .push(ValidationError::InvalidTransitionFrameDuration {
+                                scene_id: self.id.clone(),
+                                hotspot_id: hotspot.id.clone(),
+                                path: frame.path.clone(),
+                                duration_ms,
+                            });
+                    }
+                }
+            }
         }
 
         report
@@ -415,12 +467,24 @@ pub struct SceneAssets {
     pub video: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InteractionTrigger {
+    #[default]
+    Click,
+    Scroll,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hotspot {
     pub id: HotspotId,
     pub label: String,
     pub target: SceneId,
     pub bounds: Rect,
+    #[serde(default)]
+    pub trigger: InteractionTrigger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<Transition>,
 }
 
 impl Hotspot {
@@ -430,7 +494,19 @@ impl Hotspot {
             label: label.into(),
             target,
             bounds,
+            trigger: InteractionTrigger::Click,
+            transition: None,
         }
+    }
+
+    pub fn with_trigger(mut self, trigger: InteractionTrigger) -> Self {
+        self.trigger = trigger;
+        self
+    }
+
+    pub fn with_transition(mut self, transition: Transition) -> Self {
+        self.transition = Some(transition);
+        self
     }
 }
 
@@ -460,6 +536,30 @@ impl Rect {
             && self.width > 0.0
             && self.height > 0.0
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Transition {
+    #[serde(default)]
+    pub kind: TransitionKind,
+    #[serde(default)]
+    pub frames: Vec<TransitionFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_frame_duration_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransitionKind {
+    #[default]
+    FrameSequence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionFrame {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -522,6 +622,27 @@ pub enum ValidationError {
         scene_id: SceneId,
         hotspot_id: HotspotId,
         bounds: Rect,
+    },
+    EmptyTransitionFrames {
+        scene_id: SceneId,
+        hotspot_id: HotspotId,
+    },
+    InvalidTransitionFramePath {
+        scene_id: SceneId,
+        hotspot_id: HotspotId,
+        path: String,
+        reason: &'static str,
+    },
+    InvalidTransitionFrameDuration {
+        scene_id: SceneId,
+        hotspot_id: HotspotId,
+        path: String,
+        duration_ms: u32,
+    },
+    InvalidTransitionDefaultDuration {
+        scene_id: SceneId,
+        hotspot_id: HotspotId,
+        duration_ms: u32,
     },
     MissingHotspotTarget {
         scene_id: SceneId,
@@ -589,6 +710,47 @@ impl fmt::Display for ValidationError {
                     formatter,
                     "scene `{scene_id}` hotspot `{hotspot_id}` has invalid bounds x={} y={} width={} height={}",
                     bounds.x, bounds.y, bounds.width, bounds.height
+                )
+            }
+            Self::EmptyTransitionFrames {
+                scene_id,
+                hotspot_id,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` hotspot `{hotspot_id}` transition must contain at least one frame"
+                )
+            }
+            Self::InvalidTransitionFramePath {
+                scene_id,
+                hotspot_id,
+                path,
+                reason,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` hotspot `{hotspot_id}` transition frame path `{path}` is not portable: {reason}"
+                )
+            }
+            Self::InvalidTransitionFrameDuration {
+                scene_id,
+                hotspot_id,
+                path,
+                duration_ms,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` hotspot `{hotspot_id}` transition frame `{path}` has invalid duration `{duration_ms}`ms"
+                )
+            }
+            Self::InvalidTransitionDefaultDuration {
+                scene_id,
+                hotspot_id,
+                duration_ms,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` hotspot `{hotspot_id}` transition default duration must be greater than 0ms (got `{duration_ms}`ms)"
                 )
             }
             Self::MissingHotspotTarget {
@@ -870,6 +1032,8 @@ mod tests {
                 width: 50.0,
                 height: 24.0,
             },
+            trigger: InteractionTrigger::Click,
+            transition: None,
         });
 
         let report = manifest.validate();
@@ -899,6 +1063,8 @@ mod tests {
                     width: 0.0,
                     height: 10.0,
                 },
+                trigger: InteractionTrigger::Click,
+                transition: None,
             }],
             notes: None,
         });
@@ -1055,5 +1221,78 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, AddHotspotError::MissingScene { .. }));
+    }
+
+    #[test]
+    fn transition_validation_rejects_empty_frames_and_bad_durations() {
+        let mut manifest = BundleManifest::starter("Demo");
+        manifest.add_scene(Scene::screenshot(
+            SceneId::new("pricing").unwrap(),
+            "Pricing",
+            Some("captures/pricing.png".to_owned()),
+        ));
+        manifest.graph.scenes[0].hotspots.push(
+            Hotspot::new(
+                HotspotId::new("scroll-pricing").unwrap(),
+                "Scroll to pricing",
+                SceneId::new("pricing").unwrap(),
+                Rect::new(0.0, 0.0, 100.0, 40.0),
+            )
+            .with_trigger(InteractionTrigger::Scroll)
+            .with_transition(Transition {
+                kind: TransitionKind::FrameSequence,
+                frames: Vec::new(),
+                default_frame_duration_ms: Some(0),
+            }),
+        );
+
+        let report = manifest.validate();
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::EmptyTransitionFrames { .. }))
+        );
+        assert!(report.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::InvalidTransitionDefaultDuration { .. }
+        )));
+    }
+
+    #[test]
+    fn transition_frames_are_referenced_assets() {
+        let mut manifest = BundleManifest::starter("Demo");
+        manifest.add_scene(Scene::screenshot(
+            SceneId::new("pricing").unwrap(),
+            "Pricing",
+            Some("captures/pricing.png".to_owned()),
+        ));
+        manifest.graph.scenes[0].hotspots.push(
+            Hotspot::new(
+                HotspotId::new("scroll-pricing").unwrap(),
+                "Scroll to pricing",
+                SceneId::new("pricing").unwrap(),
+                Rect::new(0.0, 0.0, 100.0, 40.0),
+            )
+            .with_trigger(InteractionTrigger::Scroll)
+            .with_transition(Transition {
+                kind: TransitionKind::FrameSequence,
+                frames: vec![
+                    TransitionFrame {
+                        path: "captures/scroll-0001.png".to_owned(),
+                        duration_ms: Some(80),
+                    },
+                    TransitionFrame {
+                        path: "captures/scroll-0002.png".to_owned(),
+                        duration_ms: None,
+                    },
+                ],
+                default_frame_duration_ms: Some(90),
+            }),
+        );
+
+        let paths = manifest.referenced_asset_paths();
+        assert!(paths.contains(&"captures/scroll-0001.png"));
+        assert!(paths.contains(&"captures/scroll-0002.png"));
     }
 }

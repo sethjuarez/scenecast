@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use scenecast_core::{
-    BundleManifest, Hotspot, HotspotId, MANIFEST_FILE_NAME, Rect, Scene, SceneId, ValidationReport,
-    manifest_path, read_manifest, validate_referenced_files, write_manifest,
+    BundleManifest, Hotspot, HotspotId, InteractionTrigger, MANIFEST_FILE_NAME, Rect, Scene,
+    SceneId, Transition, TransitionFrame, TransitionKind, ValidationReport, manifest_path,
+    read_manifest, validate_referenced_files, write_manifest,
 };
 use tracing::{info, instrument};
 use tracing_subscriber::EnvFilter;
@@ -70,6 +71,24 @@ enum Command {
         /// Hotspot height in source capture pixels.
         #[arg(long)]
         height: f32,
+        /// Interaction trigger for this hotspot.
+        #[arg(long, value_enum, default_value_t = TriggerArg::Click)]
+        trigger: TriggerArg,
+    },
+    /// Attach a frame-sequence transition to an existing hotspot.
+    AddTransition {
+        /// Path to a .scenecast bundle directory.
+        bundle: PathBuf,
+        /// Source scene that owns the hotspot.
+        scene: String,
+        /// Hotspot identifier.
+        hotspot: String,
+        /// Comma-separated transition frame paths relative to the bundle root.
+        #[arg(long, value_delimiter = ',')]
+        frames: Vec<String>,
+        /// Default frame duration in milliseconds when per-frame duration is not set.
+        #[arg(long, default_value_t = 90)]
+        frame_duration_ms: u32,
     },
     /// Import a video by extracting frames with ffmpeg and adding them as scenes.
     ImportVideo {
@@ -108,6 +127,21 @@ struct NewArgs {
     title: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TriggerArg {
+    Click,
+    Scroll,
+}
+
+impl From<TriggerArg> for InteractionTrigger {
+    fn from(value: TriggerArg) -> Self {
+        match value {
+            TriggerArg::Click => InteractionTrigger::Click,
+            TriggerArg::Scroll => InteractionTrigger::Scroll,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     init_tracing();
     run(Cli::parse())
@@ -143,6 +177,7 @@ fn run(cli: Cli) -> Result<()> {
             y,
             width,
             height,
+            trigger,
         } => add_hotspot(
             &bundle,
             AddHotspotArgs {
@@ -154,6 +189,22 @@ fn run(cli: Cli) -> Result<()> {
                 y,
                 width,
                 height,
+                trigger,
+            },
+        ),
+        Command::AddTransition {
+            bundle,
+            scene,
+            hotspot,
+            frames,
+            frame_duration_ms,
+        } => add_transition(
+            &bundle,
+            AddTransitionArgs {
+                scene,
+                hotspot,
+                frames,
+                frame_duration_ms,
             },
         ),
         Command::ImportVideo {
@@ -310,6 +361,15 @@ struct AddHotspotArgs {
     y: f32,
     width: f32,
     height: f32,
+    trigger: TriggerArg,
+}
+
+#[derive(Debug)]
+struct AddTransitionArgs {
+    scene: String,
+    hotspot: String,
+    frames: Vec<String>,
+    frame_duration_ms: u32,
 }
 
 #[instrument(skip(args), fields(bundle = %bundle.display(), scene = %args.scene, hotspot = %args.id))]
@@ -319,7 +379,8 @@ fn add_hotspot(bundle: &Path, args: AddHotspotArgs) -> Result<()> {
     let hotspot_id = HotspotId::new(args.id)?;
     let target = SceneId::new(args.target)?;
     let bounds = Rect::new(args.x, args.y, args.width, args.height);
-    let hotspot = Hotspot::new(hotspot_id.clone(), args.label, target, bounds);
+    let hotspot = Hotspot::new(hotspot_id.clone(), args.label, target, bounds)
+        .with_trigger(args.trigger.into());
     let before_report = manifest.validate();
 
     manifest.add_hotspot(&scene_id, hotspot)?;
@@ -329,6 +390,51 @@ fn add_hotspot(bundle: &Path, args: AddHotspotArgs) -> Result<()> {
     info!(scene_id = %scene_id, hotspot_id = %hotspot_id, "added hotspot to bundle");
 
     println!("Added hotspot {hotspot_id} to scene {scene_id}");
+    Ok(())
+}
+
+#[instrument(skip(args), fields(bundle = %bundle.display(), scene = %args.scene, hotspot = %args.hotspot))]
+fn add_transition(bundle: &Path, args: AddTransitionArgs) -> Result<()> {
+    if args.frames.is_empty() {
+        bail!("--frames must include at least one transition frame path");
+    }
+    if args.frame_duration_ms == 0 {
+        bail!("--frame-duration-ms must be greater than 0");
+    }
+
+    let mut manifest = read_manifest(bundle)?;
+    let scene_id = SceneId::new(args.scene)?;
+    let hotspot_id = HotspotId::new(args.hotspot)?;
+    let before_report = manifest.validate();
+    let scene = manifest
+        .graph
+        .scene_mut(&scene_id)
+        .ok_or_else(|| anyhow::anyhow!("scene `{scene_id}` does not exist"))?;
+    let hotspot = scene
+        .hotspots
+        .iter_mut()
+        .find(|candidate| candidate.id == hotspot_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("scene `{scene_id}` does not contain hotspot `{hotspot_id}`")
+        })?;
+    hotspot.transition = Some(Transition {
+        kind: TransitionKind::FrameSequence,
+        frames: args
+            .frames
+            .into_iter()
+            .map(|path| TransitionFrame {
+                path: path.replace('\\', "/"),
+                duration_ms: None,
+            })
+            .collect(),
+        default_frame_duration_ms: Some(args.frame_duration_ms),
+    });
+
+    reject_introduced_errors("transition", &before_report, &manifest.validate())?;
+    write_manifest(bundle, &manifest)?;
+    info!(scene_id = %scene_id, hotspot_id = %hotspot_id, "attached hotspot transition");
+
+    println!("Added transition to hotspot {hotspot_id} in scene {scene_id}");
     Ok(())
 }
 
@@ -445,6 +551,7 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
     for (index, frame) in frames.iter().enumerate() {
         let scene_id = frame_scene_ids[index].clone();
         let next_scene_id = frame_scene_ids.get(index + 1).cloned();
+        let next_frame = frames.get(index + 1);
         let dimensions = png_dimensions(frame).unwrap_or((1, 1));
 
         let screenshot = format!("captures/{}", frame.file_name().unwrap().to_string_lossy());
@@ -453,13 +560,30 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
             format!("{} frame {}", prefix, index + 1),
             Some(screenshot),
         );
-        if let Some(target) = next_scene_id {
-            scene.hotspots.push(Hotspot::new(
-                HotspotId::new("next").expect("static hotspot id is valid"),
-                "Next frame",
-                target,
-                Rect::new(0.0, 0.0, dimensions.0 as f32, dimensions.1 as f32),
-            ));
+        if let (Some(target), Some(next_frame)) = (next_scene_id, next_frame) {
+            let transition_frame_path = format!(
+                "captures/{}",
+                next_frame.file_name().unwrap().to_string_lossy()
+            );
+            scene.hotspots.push(
+                Hotspot::new(
+                    HotspotId::new("next").expect("static hotspot id is valid"),
+                    "Next frame",
+                    target,
+                    Rect::new(0.0, 0.0, dimensions.0 as f32, dimensions.1 as f32),
+                )
+                .with_trigger(InteractionTrigger::Scroll)
+                .with_transition(Transition {
+                    kind: TransitionKind::FrameSequence,
+                    frames: vec![TransitionFrame {
+                        path: transition_frame_path,
+                        duration_ms: None,
+                    }],
+                    default_frame_duration_ms: Some(default_transition_duration_ms(
+                        args.every_seconds,
+                    )),
+                }),
+            );
         }
         manifest.add_scene(scene);
     }
@@ -486,6 +610,11 @@ fn video_filter(every_seconds: f32, crop: Option<Crop>) -> String {
         Some(crop) => format!("{},{}", crop.ffmpeg_filter(), fps),
         None => fps,
     }
+}
+
+fn default_transition_duration_ms(every_seconds: f32) -> u32 {
+    let milliseconds = (every_seconds * 1000.0).round();
+    milliseconds.clamp(1.0, u32::MAX as f32) as u32
 }
 
 fn is_untouched_starter(manifest: &BundleManifest) -> bool {
@@ -620,15 +749,50 @@ fn render_html_player(manifest: &BundleManifest) -> String {
             .hotspots
             .iter()
             .map(|hotspot| {
+                let transition = if let Some(transition) = &hotspot.transition {
+                    let kind = match transition.kind {
+                        TransitionKind::FrameSequence => "frame-sequence",
+                    };
+                    let default_duration = transition
+                        .default_frame_duration_ms
+                        .map_or_else(|| "null".to_owned(), |value| value.to_string());
+                    let frames = transition
+                        .frames
+                        .iter()
+                        .map(|frame| {
+                            let duration = frame
+                                .duration_ms
+                                .map_or_else(|| "null".to_owned(), |value| value.to_string());
+                            format!(
+                                "{{path:\"{}\",durationMs:{}}}",
+                                escape_js(&frame.path),
+                                duration
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!(
+                        "{{kind:\"{}\",defaultFrameDurationMs:{},frames:[{}]}}",
+                        kind, default_duration, frames
+                    )
+                } else {
+                    "null".to_owned()
+                };
+                let trigger = match hotspot.trigger {
+                    InteractionTrigger::Click => "click",
+                    InteractionTrigger::Scroll => "scroll",
+                };
                 format!(
-                    "{{id:\"{}\",label:\"{}\",target:\"{}\",x:{},y:{},width:{},height:{}}}",
+                    "{{id:\"{}\",label:\"{}\",target:\"{}\",trigger:\"{}\",x:{},y:{},width:{},height:{},transition:{}}}",
                     escape_js(hotspot.id.as_str()),
                     escape_js(&hotspot.label),
                     escape_js(hotspot.target.as_str()),
+                    trigger,
                     hotspot.bounds.x,
                     hotspot.bounds.y,
                     hotspot.bounds.width,
-                    hotspot.bounds.height
+                    hotspot.bounds.height,
+                    transition
                 )
             })
             .collect::<Vec<_>>()
@@ -653,32 +817,128 @@ fn render_html_player(manifest: &BundleManifest) -> String {
 html {{ margin: 0; padding: 0; width: 100vw; height: 100vh; overflow: hidden; background: #000; }}
 body {{ margin: 0; padding: 0; width: 100vw; height: 100vh; min-width: 100vw; min-height: 100vh; overflow: hidden; background: #000; }}
 #capture {{ position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; max-width: none; max-height: none; object-fit: fill; }}
+#debug-layer {{ position: fixed; inset: 0; pointer-events: none; }}
+.hotspot-debug {{ position: absolute; border: 1px dashed rgba(0, 255, 247, 0.85); background: rgba(0, 255, 247, 0.12); color: rgba(255, 255, 255, 0.95); font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 2px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
 </style>
 </head>
 <body>
 <img id="capture" alt="">
+<div id="debug-layer" hidden></div>
 <script>
 const bundleBase = new URL("./", location.href);
 const startScene = "{start}";
 const scenes = {{{scenes}}};
 const image = document.getElementById("capture");
+const debugLayer = document.getElementById("debug-layer");
 const cacheKey = new URLSearchParams(location.search).get("v") || String(Date.now());
+const debugHotspots = new URLSearchParams(location.search).get("debug") === "1";
+let currentSceneId = location.hash.slice(1) || startScene;
+let transitionRunId = 0;
+
+function sceneForCurrent() {{
+  return scenes[currentSceneId];
+}}
+
+function capturePoint(clientX, clientY) {{
+  const width = image.naturalWidth || window.innerWidth || 1;
+  const height = image.naturalHeight || window.innerHeight || 1;
+  const x = clientX * (width / window.innerWidth);
+  const y = clientY * (height / window.innerHeight);
+  return {{ x, y, width, height }};
+}}
+
+function hotspotAt(scene, clientX, clientY, trigger) {{
+  if (!scene) return null;
+  const point = capturePoint(clientX, clientY);
+  return scene.hotspots.find((hotspot) => hotspot.trigger === trigger
+    && point.x >= hotspot.x
+    && point.x <= hotspot.x + hotspot.width
+    && point.y >= hotspot.y
+    && point.y <= hotspot.y + hotspot.height);
+}}
+
+function frameUrl(path) {{
+  const frame = new URL(path, bundleBase);
+  frame.searchParams.set("scenecast-cache", cacheKey);
+  return frame.href;
+}}
+
+function sleep(durationMs) {{
+  return new Promise((resolve) => setTimeout(resolve, durationMs));
+}}
+
+async function playTransition(hotspot, runId) {{
+  const transition = hotspot.transition;
+  if (!transition || !Array.isArray(transition.frames) || transition.frames.length === 0) {{
+    return;
+  }}
+
+  for (const frame of transition.frames) {{
+    if (runId !== transitionRunId) return;
+    image.src = frameUrl(frame.path);
+    const duration = frame.durationMs ?? transition.defaultFrameDurationMs ?? 90;
+    await sleep(Math.max(1, duration));
+  }}
+}}
+
+function renderDebugHotspots() {{
+  if (!debugHotspots) return;
+  debugLayer.hidden = false;
+  debugLayer.replaceChildren();
+  const scene = sceneForCurrent();
+  if (!scene) return;
+
+  const widthScale = window.innerWidth / (image.naturalWidth || window.innerWidth || 1);
+  const heightScale = window.innerHeight / (image.naturalHeight || window.innerHeight || 1);
+  for (const hotspot of scene.hotspots) {{
+    const element = document.createElement("div");
+    element.className = "hotspot-debug";
+    element.textContent = (hotspot.trigger === "scroll" ? "\u21f5 " : "\u25cf ") + hotspot.id;
+    element.style.left = (hotspot.x * widthScale) + "px";
+    element.style.top = (hotspot.y * heightScale) + "px";
+    element.style.width = Math.max(1, hotspot.width * widthScale) + "px";
+    element.style.height = Math.max(1, hotspot.height * heightScale) + "px";
+    debugLayer.appendChild(element);
+  }}
+}}
+
 function show(sceneId) {{
   const scene = scenes[sceneId];
   if (!scene) return;
+  currentSceneId = sceneId;
   location.hash = sceneId;
   if (scene.screenshot) {{
-    const frame = new URL(scene.screenshot, bundleBase);
-    frame.searchParams.set("scenecast-cache", cacheKey);
-    image.src = frame.href;
+    image.src = frameUrl(scene.screenshot);
   }}
+  renderDebugHotspots();
 }}
-document.body.addEventListener("click", () => {{
-  const scene = scenes[location.hash.slice(1) || startScene];
-  const next = scene && scene.hotspots[0];
-  if (next) show(next.target);
+
+async function activateHotspot(hotspot) {{
+  const runId = ++transitionRunId;
+  await playTransition(hotspot, runId);
+  if (runId !== transitionRunId) return;
+  show(hotspot.target);
+}}
+
+document.body.addEventListener("click", (event) => {{
+  const scene = sceneForCurrent();
+  const hotspot = hotspotAt(scene, event.clientX, event.clientY, "click");
+  if (!hotspot) return;
+  void activateHotspot(hotspot);
 }});
-show(location.hash.slice(1) || startScene);
+
+document.body.addEventListener("wheel", (event) => {{
+  const scene = sceneForCurrent();
+  const hotspot = hotspotAt(scene, event.clientX, event.clientY, "scroll");
+  if (!hotspot) return;
+  event.preventDefault();
+  void activateHotspot(hotspot);
+}}, {{ passive: false }});
+
+window.addEventListener("hashchange", () => show(location.hash.slice(1) || startScene));
+window.addEventListener("resize", renderDebugHotspots);
+image.addEventListener("load", renderDebugHotspots);
+show(currentSceneId);
 </script>
 </body>
 </html>

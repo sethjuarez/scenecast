@@ -34,7 +34,16 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
             "id": "pricing-link",
             "label": "View pricing",
             "target": "pricing",
-            "bounds": { "x": 420, "y": 240, "width": 160, "height": 48 }
+            "bounds": { "x": 420, "y": 240, "width": 160, "height": 48 },
+            "trigger": "scroll",
+            "transition": {
+              "kind": "frame-sequence",
+              "default_frame_duration_ms": 90,
+              "frames": [
+                { "path": "captures/scroll-0001.png" },
+                { "path": "captures/scroll-0002.png", "duration_ms": 120 }
+              ]
+            }
           }
         ]
       }
@@ -59,8 +68,14 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
 - Scene and hotspot identifiers must be unique within their scope.
 - Hotspot targets must reference existing scenes.
 - Hotspot bounds must be finite and have positive width and height.
+- Hotspot `trigger` defaults to `click`; set `scroll` for wheel-driven interactions.
+- Transition `kind` currently supports `frame-sequence`.
+- Transition frame paths must be portable bundle-relative paths.
+- If a transition exists, it must include at least one frame.
+- Transition default frame duration and per-frame `duration_ms` must be greater than 0 when provided.
 - Asset paths must be portable bundle-relative paths using `/`, with no absolute paths, drive prefixes, URL schemes, empty segments, `.`, or `..`.
 - CLI validation also verifies that referenced screenshot, video, and bundle asset files exist in the bundle directory.
+- CLI validation also verifies transition frame assets exist in the bundle directory.
 - Scenes without a screenshot or video asset are valid but produce a warning, which supports incremental manual authoring.
 - `kind` is advisory in v1. Players should prefer the populated asset fields when deciding how to render a scene.
 - Hotspot `x` and `y` are finite capture-pixel coordinates and may be negative for off-canvas or transitional authoring states; `width` and `height` must be positive.

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use scenecast_core::{BundleManifest, HotspotId, SceneId, manifest_path};
+use scenecast_core::{BundleManifest, HotspotId, InteractionTrigger, SceneId, manifest_path};
 use tempfile::tempdir;
 
 #[test]
@@ -277,6 +277,8 @@ fn add_hotspot_links_scenes_and_rejects_invalid_targets() {
             "160",
             "--height",
             "48",
+            "--trigger",
+            "scroll",
         ])
         .assert()
         .success()
@@ -312,11 +314,10 @@ fn add_hotspot_links_scenes_and_rejects_invalid_targets() {
         .graph
         .scene(&SceneId::new("start").unwrap())
         .unwrap();
-    assert!(
-        start
-            .hotspot(&HotspotId::new("pricing-link").unwrap())
-            .is_some()
-    );
+    let hotspot = start
+        .hotspot(&HotspotId::new("pricing-link").unwrap())
+        .unwrap();
+    assert_eq!(hotspot.trigger, InteractionTrigger::Scroll);
 }
 
 #[test]
@@ -430,6 +431,11 @@ fn import_video_links_multiple_frames_as_clickthrough_sequence() {
         .unwrap();
     let next = first.hotspot(&HotspotId::new("next").unwrap()).unwrap();
     assert_eq!(next.target, SceneId::new("clip-0002").unwrap());
+    assert_eq!(next.trigger, InteractionTrigger::Scroll);
+    let transition = next.transition.as_ref().unwrap();
+    assert_eq!(transition.default_frame_duration_ms, Some(5000));
+    assert_eq!(transition.frames.len(), 1);
+    assert_eq!(transition.frames[0].path, "captures/clip-0002.png");
     assert_eq!(next.bounds.width, 1.0);
     assert_eq!(next.bounds.height, 1.0);
 
@@ -481,9 +487,26 @@ fn export_html_writes_clickthrough_player_and_assets() {
             "1",
             "--height",
             "1",
+            "--trigger",
+            "scroll",
         ])
         .assert()
         .success();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-transition",
+            bundle.to_str().unwrap(),
+            "start",
+            "pricing-link",
+            "--frames",
+            "captures/pricing.png",
+            "--frame-duration-ms",
+            "120",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added transition"));
 
     Command::cargo_bin("scenecast-cli")
         .unwrap()
@@ -500,7 +523,81 @@ fn export_html_writes_clickthrough_player_and_assets() {
     assert!(!html.contains("<header>"));
     assert!(html.contains("pricing-link"));
     assert!(html.contains("captures/pricing.png"));
+    assert!(html.contains("addEventListener(\"wheel\""));
+    assert!(html.contains("trigger:\"scroll\""));
+    assert!(html.contains("transition:{kind:\"frame-sequence\""));
     assert!(output.join("captures").join("pricing.png").is_file());
+}
+
+#[test]
+fn add_transition_attaches_frame_sequence_to_hotspot() {
+    let temp = tempdir().unwrap();
+    let bundle = temp.path().join("demo.scenecast");
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["new", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    fs::write(bundle.join("captures").join("scroll-0001.png"), []).unwrap();
+    fs::write(bundle.join("captures").join("scroll-0002.png"), []).unwrap();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["add-scene", bundle.to_str().unwrap(), "pricing", "Pricing"])
+        .assert()
+        .success();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-hotspot",
+            bundle.to_str().unwrap(),
+            "start",
+            "scroll-pricing",
+            "Scroll pricing",
+            "pricing",
+            "--x",
+            "0",
+            "--y",
+            "0",
+            "--width",
+            "100",
+            "--height",
+            "100",
+            "--trigger",
+            "scroll",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-transition",
+            bundle.to_str().unwrap(),
+            "start",
+            "scroll-pricing",
+            "--frames",
+            "captures/scroll-0001.png,captures/scroll-0002.png",
+            "--frame-duration-ms",
+            "85",
+        ])
+        .assert()
+        .success();
+
+    let manifest: BundleManifest =
+        serde_json::from_str(&fs::read_to_string(manifest_path(&bundle)).unwrap()).unwrap();
+    let start = manifest
+        .graph
+        .scene(&SceneId::new("start").unwrap())
+        .unwrap();
+    let hotspot = start
+        .hotspot(&HotspotId::new("scroll-pricing").unwrap())
+        .unwrap();
+    let transition = hotspot.transition.as_ref().unwrap();
+    assert_eq!(transition.default_frame_duration_ms, Some(85));
+    assert_eq!(transition.frames.len(), 2);
+    assert_eq!(transition.frames[0].path, "captures/scroll-0001.png");
+    assert_eq!(transition.frames[1].path, "captures/scroll-0002.png");
 }
 
 #[test]

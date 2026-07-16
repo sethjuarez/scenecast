@@ -10,13 +10,14 @@ This document captures the near-term direction after the initial Rust foundation
 - CLI authoring for create, inspect, validate, add-scene, add-hotspot, ffmpeg-backed import-video, and static HTML export.
 - Cross-platform CI for formatting, tests, and clippy.
 
-## Next likely foundation work
+## Remaining foundation work
 
-- Add an `add-asset` command for bundle-level supporting assets.
+- Add an `add-asset` command for bundle-level supporting assets and non-capture media references.
 - Add package/archive support so a `.scenecast` directory can become a single portable file when needed.
 - Add JSON schema export or generated bindings for web/native consumers.
-- Add richer validation once image/video dimensions are available, including hotspot bounds against capture dimensions.
-- Add sample bundles that can become end-to-end player fixtures.
+- Add richer validation against capture dimensions (for both hotspots and transition frame compatibility).
+- Add sample bundles that become end-to-end fixtures for click + scroll + transition playback.
+- Add transition authoring ergonomics beyond manual frame lists (for example, sequence import helpers).
 
 ## Product surfaces
 
