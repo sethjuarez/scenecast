@@ -7,7 +7,7 @@ This document captures the near-term direction after the initial Rust foundation
 - Rust workspace with `scenecast-core` and `scenecast-cli`.
 - Portable `.scenecast` directory bundle with `manifest.json`.
 - Scene graph, scenes, hotspots, captures, bundle assets, and validation.
-- CLI authoring for create, inspect, validate, add-scene, and add-hotspot.
+- CLI authoring for create, inspect, validate, add-scene, add-hotspot, ffmpeg-backed import-video, and static HTML export.
 - Cross-platform CI for formatting, tests, and clippy.
 
 ## Next likely foundation work
@@ -20,9 +20,9 @@ This document captures the near-term direction after the initial Rust foundation
 
 ## Product surfaces
 
-- Web authoring and web player for interactive click-through demos.
+- Web authoring and production web player for interactive click-through demos.
 - Manual screenshot import workflow.
-- Video ingest that can extract keyframes into scenes.
+- Video ingest that can extract frames into scenes, currently backed by an OS-provided ffmpeg executable.
 - Native/Tauri capture workflows.
 - Rust CLI workflows for automation and CI.
 - Later cloud publishing, sharing, and analytics.
