@@ -29,6 +29,11 @@ The HTML export is a static site: copy the generated folder to GitHub Pages, ope
 `index.html`, and use hash routes such as `#/0/0` to deep-link into a section and
 scene.
 
+## Examples
+
+- `examples\scroll.scenecast` demonstrates a wheel-triggered hotspot, frame-sequence transition, guide mark, and click hotspot in a fully static bundle.
+- `examples\playwright-scroll-capture` is a Playwright starter that captures a scrollable HTML page into a generated `.scenecast` bundle.
+
 ## Development
 
 ```powershell

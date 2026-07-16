@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" width="1440" height="900" role="img" aria-label="Top of sample landing page">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10172a"/>
+      <stop offset="1" stop-color="#235f72"/>
+    </linearGradient>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg)"/>
+  <rect x="64" y="52" width="1312" height="78" rx="28" fill="#ffffff" opacity="0.12"/>
+  <text x="96" y="102" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="30" font-weight="700">Scenecast</text>
+  <text x="96" y="270" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="74" font-weight="800">Static images,</text>
+  <text x="96" y="350" fill="#94f5ff" font-family="Segoe UI, Arial, sans-serif" font-size="74" font-weight="800">scroll-like motion.</text>
+  <text x="100" y="420" fill="#d7f7ff" font-family="Segoe UI, Arial, sans-serif" font-size="28">Wheel anywhere on this capture to play transition frames and land on the next scene.</text>
+  <rect x="1046" y="690" width="250" height="112" rx="28" fill="#00fff7" opacity="0.16" stroke="#00fff7" stroke-width="4"/>
+  <text x="1092" y="742" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="700">Scroll down</text>
+  <text x="1130" y="780" fill="#d7f7ff" font-family="Segoe UI, Arial, sans-serif" font-size="22">mouse wheel</text>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" width="1440" height="900" role="img" aria-label="Intermediate scroll transition frame two">
+  <rect width="1440" height="900" fill="#17495a"/>
+  <text x="96" y="120" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="54" font-weight="800">Transition frame 2</text>
+  <rect x="96" y="172" width="1248" height="220" rx="36" fill="#ffffff" opacity="0.10"/>
+  <rect x="96" y="444" width="1248" height="220" rx="36" fill="#00fff7" opacity="0.16"/>
+  <rect x="96" y="716" width="1248" height="220" rx="36" fill="#ffffff" opacity="0.10"/>
+  <path d="M720 686 l-42 -42 h28 v-150 h28 v150 h28z" fill="#00fff7"/>
+  <text x="500" y="782" fill="#d7f7ff" font-family="Segoe UI, Arial, sans-serif" font-size="28">Then it navigates to the target scene.</text>
+</svg>

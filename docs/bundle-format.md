@@ -52,6 +52,7 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
             "target": "pricing",
             "bounds": { "x": 420, "y": 240, "width": 160, "height": 48 },
             "trigger": "scroll",
+            "scroll_direction": "down",
             "transition": {
               "kind": "frame-sequence",
               "default_frame_duration_ms": 90,
@@ -89,6 +90,7 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
 - Hotspot targets must reference existing scenes.
 - Hotspot bounds must be finite and have positive width and height.
 - Hotspot `trigger` defaults to `click`; set `scroll` for wheel-driven interactions.
+- Scroll hotspots can set `scroll_direction` to `down`, `up`, or `any`; omitted values default to `any`.
 - Transition `kind` currently supports `frame-sequence`.
 - Transition frame paths must be portable bundle-relative paths.
 - If a transition exists, it must include at least one frame.

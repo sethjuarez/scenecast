@@ -1,0 +1,116 @@
+{
+  "schema_version": "scenecast.bundle.v1",
+  "title": "Scroll transition sample",
+  "sections": [
+    {
+      "id": "main",
+      "title": "Scroll demo",
+      "scenes": [
+        "home-top",
+        "home-bottom"
+      ]
+    }
+  ],
+  "graph": {
+    "start_scene": "home-top",
+    "scenes": [
+      {
+        "id": "home-top",
+        "title": "Home top",
+        "kind": "screenshot",
+        "description": "Top of a landing page with a scroll affordance.",
+        "assets": {
+          "screenshot": "captures/home-top.svg"
+        },
+        "hotspots": [
+          {
+            "id": "scroll-down",
+            "label": "Scroll down",
+            "target": "home-bottom",
+            "bounds": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1440.0,
+              "height": 900.0
+            },
+            "trigger": "scroll",
+            "scroll_direction": "down",
+            "transition": {
+              "kind": "frame-sequence",
+              "default_frame_duration_ms": 90,
+              "frames": [
+                {
+                  "path": "captures/scroll-0001.svg"
+                },
+                {
+                  "path": "captures/scroll-0002.svg"
+                }
+              ]
+            }
+          }
+        ],
+        "guide_marks": [
+          {
+            "id": "scroll-guide",
+            "label": "Use the mouse wheel to scroll",
+            "bounds": {
+              "x": 1050.0,
+              "y": 700.0,
+              "width": 240.0,
+              "height": 92.0
+            },
+            "style": "pulse"
+          }
+        ]
+      },
+      {
+        "id": "home-bottom",
+        "title": "Home bottom",
+        "kind": "screenshot",
+        "description": "Lower page state reached by a wheel-triggered hotspot.",
+        "assets": {
+          "screenshot": "captures/home-bottom.svg"
+        },
+        "hotspots": [
+          {
+            "id": "scroll-up",
+            "label": "Scroll up",
+            "target": "home-top",
+            "bounds": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1440.0,
+              "height": 900.0
+            },
+            "trigger": "scroll",
+            "scroll_direction": "up",
+            "transition": {
+              "kind": "frame-sequence",
+              "default_frame_duration_ms": 90,
+              "frames": [
+                {
+                  "path": "captures/scroll-0002.svg"
+                },
+                {
+                  "path": "captures/scroll-0001.svg"
+                }
+              ]
+            }
+          },
+          {
+            "id": "back-to-top",
+            "label": "Back to top",
+            "target": "home-top",
+            "bounds": {
+              "x": 62.0,
+              "y": 62.0,
+              "width": 168.0,
+              "height": 56.0
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "assets": []
+}

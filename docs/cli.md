@@ -42,10 +42,10 @@ The screenshot path is stored relative to the bundle root. Paths must be portabl
 ## Add a hotspot
 
 ```powershell
-cargo run -p scenecast-cli -- add-hotspot demos\hello.scenecast start pricing-link "View pricing" pricing --x 420 --y 240 --width 160 --height 48 --trigger scroll
+cargo run -p scenecast-cli -- add-hotspot demos\hello.scenecast start pricing-link "View pricing" pricing --x 420 --y 240 --width 160 --height 48 --trigger scroll --scroll-direction down
 ```
 
-Hotspots belong to a source scene and target another scene by ID. Coordinates are capture-pixel values. Width and height must be positive. Trigger defaults to `click`; use `scroll` for wheel-style interactions.
+Hotspots belong to a source scene and target another scene by ID. Coordinates are capture-pixel values. Width and height must be positive. Trigger defaults to `click`; use `scroll` for wheel-style interactions. Scroll hotspots can use `--scroll-direction down`, `--scroll-direction up`, or the default `any`.
 
 ## Add a guide mark
 
@@ -94,6 +94,12 @@ cargo run -p scenecast-cli -- export-html demos\hello.scenecast demos\hello-play
 The command writes `index.html` and copies referenced captures/assets into the output directory. Open the generated `index.html` in a browser to test the click-through locally.
 
 Exported HTML is intentionally static-host friendly: the output folder contains `index.html` plus copied relative assets and can be published from `docs/`, a `gh-pages` branch, or any static file host. The player stretches screenshot or video scenes to the viewport, renders guide marks, provides a table of contents, supports keyboard navigation, and replays transition frames before landing on the destination scene. Hash routes such as `#/0/0` deep-link to section and scene positions without server rewrites. Add `?debug=1` to the URL for a minimal hotspot overlay while tuning bounds.
+
+The repository includes `examples\scroll.scenecast` as a complete static scroll sample. Export it with:
+
+```powershell
+cargo run -p scenecast-cli -- export-html examples\scroll.scenecast demos\scroll-player
+```
 
 ## Validate a bundle
 

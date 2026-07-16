@@ -572,6 +572,19 @@ pub enum InteractionTrigger {
     Scroll,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScrollDirection {
+    #[default]
+    Any,
+    Down,
+    Up,
+}
+
+fn is_default_scroll_direction(direction: &ScrollDirection) -> bool {
+    *direction == ScrollDirection::Any
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hotspot {
     pub id: HotspotId,
@@ -580,6 +593,8 @@ pub struct Hotspot {
     pub bounds: Rect,
     #[serde(default)]
     pub trigger: InteractionTrigger,
+    #[serde(default, skip_serializing_if = "is_default_scroll_direction")]
+    pub scroll_direction: ScrollDirection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
 }
@@ -592,12 +607,18 @@ impl Hotspot {
             target,
             bounds,
             trigger: InteractionTrigger::Click,
+            scroll_direction: ScrollDirection::Any,
             transition: None,
         }
     }
 
     pub fn with_trigger(mut self, trigger: InteractionTrigger) -> Self {
         self.trigger = trigger;
+        self
+    }
+
+    pub fn with_scroll_direction(mut self, direction: ScrollDirection) -> Self {
+        self.scroll_direction = direction;
         self
     }
 
@@ -1278,6 +1299,7 @@ mod tests {
                 height: 24.0,
             },
             trigger: InteractionTrigger::Click,
+            scroll_direction: ScrollDirection::Any,
             transition: None,
         });
 
@@ -1309,6 +1331,7 @@ mod tests {
                     height: 10.0,
                 },
                 trigger: InteractionTrigger::Click,
+                scroll_direction: ScrollDirection::Any,
                 transition: None,
             }],
             guide_marks: Vec::new(),
