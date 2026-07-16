@@ -29,15 +29,15 @@ hello.scenecast\
 cargo run -p scenecast-cli -- inspect demos\hello.scenecast
 ```
 
-The summary includes title, schema version, start scene, scene count, asset count, warning count, and error count.
+The summary includes title, schema version, start scene, section count, scene count, asset count, warning count, and error count.
 
 ## Add a scene
 
 ```powershell
-cargo run -p scenecast-cli -- add-scene demos\hello.scenecast pricing "Pricing" --screenshot captures\pricing.png
+cargo run -p scenecast-cli -- add-scene demos\hello.scenecast pricing "Pricing" --screenshot captures\pricing.png --description "Pricing page overview" --notes "Mention annual plan"
 ```
 
-The screenshot path is stored relative to the bundle root. Paths must be portable and use `/` in the manifest; PowerShell accepts the command argument shown above, and the manifest examples use `/`.
+The screenshot path is stored relative to the bundle root. Paths must be portable and use `/` in the manifest; PowerShell accepts the command argument shown above, and the manifest examples use `/`. `--description` stores authored text for search, accessibility, narration, and review. `--notes` stores presenter or authoring notes.
 
 ## Add a hotspot
 
@@ -46,6 +46,22 @@ cargo run -p scenecast-cli -- add-hotspot demos\hello.scenecast start pricing-li
 ```
 
 Hotspots belong to a source scene and target another scene by ID. Coordinates are capture-pixel values. Width and height must be positive. Trigger defaults to `click`; use `scroll` for wheel-style interactions.
+
+## Add a guide mark
+
+```powershell
+cargo run -p scenecast-cli -- add-guide-mark demos\hello.scenecast pricing price-callout "Plan selector" --x 320 --y 220 --width 240 --height 72 --style highlight
+```
+
+Guide marks are visible overlays that draw attention without changing navigation. Coordinates are capture-pixel values. Styles are `pulse`, `ring`, and `highlight`.
+
+## Add a table-of-contents section
+
+```powershell
+cargo run -p scenecast-cli -- add-section demos\hello.scenecast overview "Overview" --scenes start,pricing
+```
+
+Sections group scenes for the exported player's table of contents and hash deep links. Scene IDs are comma-separated and stored in playback order.
 
 ## Add a transition frame sequence
 
@@ -75,9 +91,9 @@ Use `--crop x,y,width,height` to remove browser chrome or other recording matte 
 cargo run -p scenecast-cli -- export-html demos\hello.scenecast demos\hello-player
 ```
 
-The command writes a minimal `index.html` and copies referenced captures/assets into the output directory. Open the generated `index.html` in a browser to test the click-through locally.
+The command writes `index.html` and copies referenced captures/assets into the output directory. Open the generated `index.html` in a browser to test the click-through locally.
 
-Exported HTML is intentionally chrome-free: the body contains the current scene image stretched to the viewport, with hotspot-region click/wheel handlers and transition frame replay before landing on the destination scene. Add `?debug=1` to the URL for a minimal hotspot overlay while tuning bounds.
+Exported HTML is intentionally static-host friendly: the output folder contains `index.html` plus copied relative assets and can be published from `docs/`, a `gh-pages` branch, or any static file host. The player stretches screenshot or video scenes to the viewport, renders guide marks, provides a table of contents, supports keyboard navigation, and replays transition frames before landing on the destination scene. Hash routes such as `#/0/0` deep-link to section and scene positions without server rewrites. Add `?debug=1` to the URL for a minimal hotspot overlay while tuning bounds.
 
 ## Validate a bundle
 
@@ -90,8 +106,10 @@ Validation checks both manifest structure and referenced files:
 - schema version and title;
 - start scene existence;
 - duplicate scene and hotspot IDs;
+- duplicate guide mark IDs;
+- section scene references;
 - hotspot targets;
-- hotspot bounds;
+- hotspot and guide mark bounds;
 - hotspot trigger and transition shape;
 - portable asset paths;
 - exact-case file existence for screenshots, videos, transition frames, and bundle assets.

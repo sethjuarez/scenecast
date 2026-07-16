@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use scenecast_core::{BundleManifest, HotspotId, InteractionTrigger, SceneId, manifest_path};
+use scenecast_core::{
+    BundleManifest, GuideMarkId, GuideMarkStyle, HotspotId, InteractionTrigger, SceneId,
+    manifest_path,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -321,6 +324,110 @@ fn add_hotspot_links_scenes_and_rejects_invalid_targets() {
 }
 
 #[test]
+fn add_guide_mark_and_section_are_exported_to_static_player() {
+    let temp = tempdir().unwrap();
+    let bundle = temp.path().join("demo.scenecast");
+    let output = temp.path().join("player");
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["new", bundle.to_str().unwrap(), "--title", "Demo"])
+        .assert()
+        .success();
+    fs::write(bundle.join("captures").join("pricing.png"), []).unwrap();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-scene",
+            bundle.to_str().unwrap(),
+            "pricing",
+            "Pricing",
+            "--screenshot",
+            "captures/pricing.png",
+            "--description",
+            "Pricing page overview",
+            "--notes",
+            "Mention annual plan",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-guide-mark",
+            bundle.to_str().unwrap(),
+            "pricing",
+            "annual-plan",
+            "Annual plan",
+            "--x",
+            "320",
+            "--y",
+            "240",
+            "--width",
+            "180",
+            "--height",
+            "64",
+            "--style",
+            "highlight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Added guide mark annual-plan to scene pricing",
+        ));
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-section",
+            bundle.to_str().unwrap(),
+            "overview",
+            "Overview",
+            "--scenes",
+            "start,pricing",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added section overview"));
+
+    let manifest: BundleManifest =
+        serde_json::from_str(&fs::read_to_string(manifest_path(&bundle)).unwrap()).unwrap();
+    let pricing = manifest
+        .graph
+        .scene(&SceneId::new("pricing").unwrap())
+        .unwrap();
+    let guide_mark = pricing
+        .guide_marks
+        .iter()
+        .find(|mark| mark.id == GuideMarkId::new("annual-plan").unwrap())
+        .unwrap();
+    assert_eq!(guide_mark.style, GuideMarkStyle::Highlight);
+    assert_eq!(
+        pricing.description.as_deref(),
+        Some("Pricing page overview")
+    );
+    assert_eq!(manifest.sections[1].title, "Overview");
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-html",
+            bundle.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let html = fs::read_to_string(output.join("index.html")).unwrap();
+    assert!(html.contains("\"sections\""));
+    assert!(html.contains("\"guideMarks\""));
+    assert!(html.contains("\"annual-plan\""));
+    assert!(html.contains("Pricing page overview"));
+    assert!(html.contains("routeForScene"));
+}
+
+#[test]
 fn import_video_extracts_frames_with_ffmpeg_and_adds_scenes() {
     let temp = tempdir().unwrap();
     let bundle = temp.path().join("demo.scenecast");
@@ -524,8 +631,8 @@ fn export_html_writes_clickthrough_player_and_assets() {
     assert!(html.contains("pricing-link"));
     assert!(html.contains("captures/pricing.png"));
     assert!(html.contains("addEventListener(\"wheel\""));
-    assert!(html.contains("trigger:\"scroll\""));
-    assert!(html.contains("transition:{kind:\"frame-sequence\""));
+    assert!(html.contains("\"trigger\":\"scroll\""));
+    assert!(html.contains("\"kind\":\"frame-sequence\""));
     assert!(output.join("captures").join("pricing.png").is_file());
 }
 

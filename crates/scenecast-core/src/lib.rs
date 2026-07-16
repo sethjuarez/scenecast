@@ -82,6 +82,54 @@ impl fmt::Display for HotspotId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GuideMarkId(String);
+
+impl GuideMarkId {
+    pub fn new(value: impl Into<String>) -> Result<Self, GuideMarkIdError> {
+        let value = value.into();
+        if let Err(reason) = validate_identifier(&value) {
+            return Err(GuideMarkIdError { value, reason });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GuideMarkId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Serialize for GuideMarkId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GuideMarkId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid guide mark id `{value}`: {reason}")]
+pub struct GuideMarkIdError {
+    value: String,
+    reason: &'static str,
+}
+
 impl Serialize for HotspotId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -111,6 +159,8 @@ pub struct HotspotIdError {
 pub struct BundleManifest {
     pub schema_version: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<Section>,
     pub graph: SceneGraph,
     #[serde(default)]
     pub assets: Vec<BundleAsset>,
@@ -124,6 +174,11 @@ impl BundleManifest {
         Self {
             schema_version: SCHEMA_VERSION.to_owned(),
             title: title.clone(),
+            sections: vec![Section {
+                id: "main".to_owned(),
+                title: "Main".to_owned(),
+                scenes: vec![start_scene.clone()],
+            }],
             graph: SceneGraph {
                 start_scene: start_scene.clone(),
                 scenes: vec![Scene {
@@ -132,6 +187,8 @@ impl BundleManifest {
                     kind: SceneKind::Screenshot,
                     assets: SceneAssets::default(),
                     hotspots: Vec::new(),
+                    guide_marks: Vec::new(),
+                    description: None,
                     notes: Some(format!("Starter scene for {title}")),
                 }],
             },
@@ -225,9 +282,18 @@ impl BundleManifest {
             }
         }
 
+        report.extend(validate_sections(&self.sections, &self.graph));
         report.extend(self.graph.validate());
         report
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Section {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub scenes: Vec<SceneId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -330,6 +396,10 @@ pub struct Scene {
     pub assets: SceneAssets,
     #[serde(default)]
     pub hotspots: Vec<Hotspot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guide_marks: Vec<GuideMark>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 }
@@ -345,6 +415,8 @@ impl Scene {
                 video: None,
             },
             hotspots: Vec::new(),
+            guide_marks: Vec::new(),
+            description: None,
             notes: None,
         }
     }
@@ -356,6 +428,7 @@ impl Scene {
     fn validate(&self) -> ValidationReport {
         let mut report = ValidationReport::default();
         let mut hotspot_ids = HashSet::new();
+        let mut guide_mark_ids = HashSet::new();
 
         if self.assets.screenshot.is_none() && self.assets.video.is_none() {
             report.warnings.push(ValidationWarning::SceneHasNoCapture {
@@ -446,6 +519,30 @@ impl Scene {
             }
         }
 
+        for guide_mark in &self.guide_marks {
+            if !guide_mark_ids.insert(guide_mark.id.clone()) {
+                report.errors.push(ValidationError::DuplicateGuideMarkId {
+                    scene_id: self.id.clone(),
+                    guide_mark_id: guide_mark.id.clone(),
+                });
+            }
+
+            if guide_mark.label.trim().is_empty() {
+                report.errors.push(ValidationError::EmptyGuideMarkLabel {
+                    scene_id: self.id.clone(),
+                    guide_mark_id: guide_mark.id.clone(),
+                });
+            }
+
+            if !guide_mark.bounds.is_valid() {
+                report.errors.push(ValidationError::InvalidGuideMarkBounds {
+                    scene_id: self.id.clone(),
+                    guide_mark_id: guide_mark.id.clone(),
+                    bounds: guide_mark.bounds,
+                });
+            }
+        }
+
         report
     }
 }
@@ -508,6 +605,35 @@ impl Hotspot {
         self.transition = Some(transition);
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GuideMark {
+    pub id: GuideMarkId,
+    pub label: String,
+    pub bounds: Rect,
+    #[serde(default)]
+    pub style: GuideMarkStyle,
+}
+
+impl GuideMark {
+    pub fn new(id: GuideMarkId, label: impl Into<String>, bounds: Rect) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            bounds,
+            style: GuideMarkStyle::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GuideMarkStyle {
+    #[default]
+    Pulse,
+    Ring,
+    Highlight,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -600,6 +726,20 @@ pub enum ValidationError {
     EmptyAssetMediaType {
         path: String,
     },
+    InvalidSectionId {
+        section_id: String,
+        reason: &'static str,
+    },
+    DuplicateSectionId {
+        section_id: String,
+    },
+    EmptySectionTitle {
+        section_id: String,
+    },
+    MissingSectionScene {
+        section_id: String,
+        scene_id: SceneId,
+    },
     NoScenes,
     MissingStartScene {
         scene_id: SceneId,
@@ -617,6 +757,19 @@ pub enum ValidationError {
     EmptyHotspotLabel {
         scene_id: SceneId,
         hotspot_id: HotspotId,
+    },
+    DuplicateGuideMarkId {
+        scene_id: SceneId,
+        guide_mark_id: GuideMarkId,
+    },
+    EmptyGuideMarkLabel {
+        scene_id: SceneId,
+        guide_mark_id: GuideMarkId,
+    },
+    InvalidGuideMarkBounds {
+        scene_id: SceneId,
+        guide_mark_id: GuideMarkId,
+        bounds: Rect,
     },
     InvalidHotspotBounds {
         scene_id: SceneId,
@@ -673,6 +826,27 @@ impl fmt::Display for ValidationError {
                     "bundle asset `{path}` media_type must not be empty"
                 )
             }
+            Self::InvalidSectionId { section_id, reason } => {
+                write!(
+                    formatter,
+                    "section id `{section_id}` is not valid: {reason}"
+                )
+            }
+            Self::DuplicateSectionId { section_id } => {
+                write!(formatter, "section id `{section_id}` is duplicated")
+            }
+            Self::EmptySectionTitle { section_id } => {
+                write!(formatter, "section `{section_id}` title must not be empty")
+            }
+            Self::MissingSectionScene {
+                section_id,
+                scene_id,
+            } => {
+                write!(
+                    formatter,
+                    "section `{section_id}` references missing scene `{scene_id}`"
+                )
+            }
             Self::NoScenes => formatter.write_str("scene graph must contain at least one scene"),
             Self::MissingStartScene { scene_id } => {
                 write!(formatter, "start scene `{scene_id}` does not exist")
@@ -709,6 +883,35 @@ impl fmt::Display for ValidationError {
                 write!(
                     formatter,
                     "scene `{scene_id}` hotspot `{hotspot_id}` has invalid bounds x={} y={} width={} height={}",
+                    bounds.x, bounds.y, bounds.width, bounds.height
+                )
+            }
+            Self::DuplicateGuideMarkId {
+                scene_id,
+                guide_mark_id,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` guide mark id `{guide_mark_id}` is duplicated"
+                )
+            }
+            Self::EmptyGuideMarkLabel {
+                scene_id,
+                guide_mark_id,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` guide mark `{guide_mark_id}` label must not be empty"
+                )
+            }
+            Self::InvalidGuideMarkBounds {
+                scene_id,
+                guide_mark_id,
+                bounds,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` guide mark `{guide_mark_id}` has invalid bounds x={} y={} width={} height={}",
                     bounds.x, bounds.y, bounds.width, bounds.height
                 )
             }
@@ -765,6 +968,48 @@ impl fmt::Display for ValidationError {
             }
         }
     }
+}
+
+fn validate_sections(sections: &[Section], graph: &SceneGraph) -> ValidationReport {
+    let mut report = ValidationReport::default();
+    let scene_ids = graph
+        .scenes
+        .iter()
+        .map(|scene| scene.id.clone())
+        .collect::<HashSet<_>>();
+    let mut section_ids = HashSet::new();
+
+    for section in sections {
+        if let Err(reason) = validate_identifier(&section.id) {
+            report.errors.push(ValidationError::InvalidSectionId {
+                section_id: section.id.clone(),
+                reason,
+            });
+        }
+
+        if !section_ids.insert(section.id.clone()) {
+            report.errors.push(ValidationError::DuplicateSectionId {
+                section_id: section.id.clone(),
+            });
+        }
+
+        if section.title.trim().is_empty() {
+            report.errors.push(ValidationError::EmptySectionTitle {
+                section_id: section.id.clone(),
+            });
+        }
+
+        for scene_id in &section.scenes {
+            if !scene_ids.contains(scene_id) {
+                report.errors.push(ValidationError::MissingSectionScene {
+                    section_id: section.id.clone(),
+                    scene_id: scene_id.clone(),
+                });
+            }
+        }
+    }
+
+    report
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1066,6 +1311,8 @@ mod tests {
                 trigger: InteractionTrigger::Click,
                 transition: None,
             }],
+            guide_marks: Vec::new(),
+            description: None,
             notes: None,
         });
 
