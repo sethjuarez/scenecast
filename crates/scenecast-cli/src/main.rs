@@ -7,8 +7,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use scenecast_core::{
     BundleManifest, GuideMark, GuideMarkId, GuideMarkStyle, Hotspot, HotspotId, InteractionTrigger,
-    MANIFEST_FILE_NAME, Rect, Scene, SceneId, Section, Transition, TransitionFrame, TransitionKind,
-    ValidationReport, manifest_path, read_manifest, validate_referenced_files, write_manifest,
+    MANIFEST_FILE_NAME, Rect, Scene, SceneId, ScrollDirection, Section, Transition,
+    TransitionFrame, TransitionKind, ValidationReport, manifest_path, read_manifest,
+    validate_referenced_files, write_manifest,
 };
 use serde_json::json;
 use tracing::{info, instrument};
@@ -82,6 +83,9 @@ enum Command {
         /// Interaction trigger for this hotspot.
         #[arg(long, value_enum, default_value_t = TriggerArg::Click)]
         trigger: TriggerArg,
+        /// Wheel direction for scroll hotspots.
+        #[arg(long, value_enum, default_value_t = ScrollDirectionArg::Any)]
+        scroll_direction: ScrollDirectionArg,
     },
     /// Add a visible guide mark to a scene without changing navigation.
     AddGuideMark {
@@ -189,6 +193,23 @@ impl From<TriggerArg> for InteractionTrigger {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum ScrollDirectionArg {
+    Any,
+    Down,
+    Up,
+}
+
+impl From<ScrollDirectionArg> for ScrollDirection {
+    fn from(value: ScrollDirectionArg) -> Self {
+        match value {
+            ScrollDirectionArg::Any => ScrollDirection::Any,
+            ScrollDirectionArg::Down => ScrollDirection::Down,
+            ScrollDirectionArg::Up => ScrollDirection::Up,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum GuideMarkStyleArg {
     Pulse,
     Ring,
@@ -243,6 +264,7 @@ fn run(cli: Cli) -> Result<()> {
             width,
             height,
             trigger,
+            scroll_direction,
         } => add_hotspot(
             &bundle,
             AddHotspotArgs {
@@ -255,6 +277,7 @@ fn run(cli: Cli) -> Result<()> {
                 width,
                 height,
                 trigger,
+                scroll_direction,
             },
         ),
         Command::AddGuideMark {
@@ -467,6 +490,7 @@ struct AddHotspotArgs {
     width: f32,
     height: f32,
     trigger: TriggerArg,
+    scroll_direction: ScrollDirectionArg,
 }
 
 #[derive(Debug)]
@@ -504,7 +528,8 @@ fn add_hotspot(bundle: &Path, args: AddHotspotArgs) -> Result<()> {
     let target = SceneId::new(args.target)?;
     let bounds = Rect::new(args.x, args.y, args.width, args.height);
     let hotspot = Hotspot::new(hotspot_id.clone(), args.label, target, bounds)
-        .with_trigger(args.trigger.into());
+        .with_trigger(args.trigger.into())
+        .with_scroll_direction(args.scroll_direction.into());
     let before_report = manifest.validate();
 
     manifest.add_hotspot(&scene_id, hotspot)?;
@@ -994,6 +1019,8 @@ const cacheKey = new URLSearchParams(location.search).get("v") || String(Date.no
 const debugHotspots = new URLSearchParams(location.search).get("debug") === "1";
 let currentSceneId = parseSceneFromHash() || startScene;
 let transitionRunId = 0;
+let isTransitioning = false;
+const imagePreloads = new Map();
 
 function sceneForCurrent() {{
   return scenes[currentSceneId];
@@ -1007,10 +1034,19 @@ function capturePoint(clientX, clientY) {{
   return {{ x, y, width, height }};
 }}
 
-function hotspotAt(scene, clientX, clientY, trigger) {{
+function scrollDirectionMatches(hotspot, deltaY) {{
+  const direction = hotspot.scrollDirection || "any";
+  if (direction === "any") return true;
+  if (direction === "down") return deltaY > 0;
+  if (direction === "up") return deltaY < 0;
+  return true;
+}}
+
+function hotspotAt(scene, clientX, clientY, trigger, deltaY = 0) {{
   if (!scene) return null;
   const point = capturePoint(clientX, clientY);
   return scene.hotspots.find((hotspot) => hotspot.trigger === trigger
+    && (trigger !== "scroll" || scrollDirectionMatches(hotspot, deltaY))
     && point.x >= hotspot.x
     && point.x <= hotspot.x + hotspot.width
     && point.y >= hotspot.y
@@ -1028,6 +1064,33 @@ function sleep(durationMs) {{
   return new Promise((resolve) => setTimeout(resolve, durationMs));
 }}
 
+function preloadImage(url) {{
+  if (!url) return Promise.resolve();
+  if (imagePreloads.has(url)) return imagePreloads.get(url);
+
+  const preload = new Promise((resolve) => {{
+    const loader = new Image();
+    loader.onload = () => resolve();
+    loader.onerror = () => resolve();
+    loader.src = url;
+  }});
+  imagePreloads.set(url, preload);
+  return preload;
+}}
+
+function preloadScene(scene) {{
+  if (!scene) return;
+  if (scene.screenshot) void preloadImage(frameUrl(scene.screenshot));
+  for (const hotspot of scene.hotspots) {{
+    const target = scenes[hotspot.target];
+    if (target?.screenshot) void preloadImage(frameUrl(target.screenshot));
+    const frames = hotspot.transition?.frames || [];
+    for (const frame of frames) {{
+      if (frame.path) void preloadImage(frameUrl(frame.path));
+    }}
+  }}
+}}
+
 async function playTransition(hotspot, runId) {{
   const transition = hotspot.transition;
   if (!transition || !Array.isArray(transition.frames) || transition.frames.length === 0) {{
@@ -1036,7 +1099,10 @@ async function playTransition(hotspot, runId) {{
 
   for (const frame of transition.frames) {{
     if (runId !== transitionRunId) return;
-    image.src = frameUrl(frame.path);
+    const url = frameUrl(frame.path);
+    await preloadImage(url);
+    if (runId !== transitionRunId) return;
+    image.src = url;
     const duration = frame.durationMs ?? transition.defaultFrameDurationMs ?? 90;
     await sleep(Math.max(1, duration));
   }}
@@ -1073,6 +1139,11 @@ function mediaSize() {{
 
 function renderDebugHotspots() {{
   if (!debugHotspots) return;
+  if (isTransitioning) {{
+    debugLayer.replaceChildren();
+    debugLayer.hidden = true;
+    return;
+  }}
   debugLayer.hidden = false;
   debugLayer.replaceChildren();
   const scene = sceneForCurrent();
@@ -1084,7 +1155,8 @@ function renderDebugHotspots() {{
   for (const hotspot of scene.hotspots) {{
     const element = document.createElement("div");
     element.className = "hotspot-debug";
-    element.textContent = (hotspot.trigger === "scroll" ? "\u21f5 " : "\u25cf ") + hotspot.id;
+    const scrollIcon = hotspot.scrollDirection === "up" ? "\u21e7 " : hotspot.scrollDirection === "down" ? "\u21e9 " : "\u21f5 ";
+    element.textContent = (hotspot.trigger === "scroll" ? scrollIcon : "\u25cf ") + hotspot.id;
     element.style.left = (hotspot.x * widthScale) + "px";
     element.style.top = (hotspot.y * heightScale) + "px";
     element.style.width = Math.max(1, hotspot.width * widthScale) + "px";
@@ -1095,6 +1167,7 @@ function renderDebugHotspots() {{
 
 function renderGuideMarks() {{
   guideLayer.replaceChildren();
+  if (isTransitioning) return;
   const scene = sceneForCurrent();
   if (!scene) return;
   const size = mediaSize();
@@ -1111,6 +1184,12 @@ function renderGuideMarks() {{
     element.style.height = Math.max(1, guideMark.height * heightScale) + "px";
     guideLayer.appendChild(element);
   }}
+}}
+
+function clearSceneOverlays() {{
+  guideLayer.replaceChildren();
+  debugLayer.replaceChildren();
+  debugLayer.hidden = true;
 }}
 
 function renderToc() {{
@@ -1167,16 +1246,25 @@ function show(sceneId) {{
   }}
   image.alt = scene.description || scene.title;
   sceneStatus.textContent = scene.description || scene.title;
+  preloadScene(scene);
   renderGuideMarks();
   renderDebugHotspots();
   renderToc();
 }}
 
 async function activateHotspot(hotspot) {{
+  if (isTransitioning) return;
+  isTransitioning = true;
   const runId = ++transitionRunId;
-  await playTransition(hotspot, runId);
-  if (runId !== transitionRunId) return;
-  show(hotspot.target);
+  clearSceneOverlays();
+  try {{
+    await playTransition(hotspot, runId);
+    if (runId !== transitionRunId) return;
+    isTransitioning = false;
+    show(hotspot.target);
+  }} finally {{
+    if (runId === transitionRunId) isTransitioning = false;
+  }}
 }}
 
 document.body.addEventListener("click", (event) => {{
@@ -1187,8 +1275,12 @@ document.body.addEventListener("click", (event) => {{
 }});
 
 document.body.addEventListener("wheel", (event) => {{
+  if (isTransitioning) {{
+    event.preventDefault();
+    return;
+  }}
   const scene = sceneForCurrent();
-  const hotspot = hotspotAt(scene, event.clientX, event.clientY, "scroll");
+  const hotspot = hotspotAt(scene, event.clientX, event.clientY, "scroll", event.deltaY);
   if (!hotspot) return;
   event.preventDefault();
   void activateHotspot(hotspot);
@@ -1267,11 +1359,17 @@ fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
                         InteractionTrigger::Click => "click",
                         InteractionTrigger::Scroll => "scroll",
                     };
+                    let scroll_direction = match hotspot.scroll_direction {
+                        ScrollDirection::Any => "any",
+                        ScrollDirection::Down => "down",
+                        ScrollDirection::Up => "up",
+                    };
                     json!({
                         "id": hotspot.id.as_str(),
                         "label": hotspot.label,
                         "target": hotspot.target.as_str(),
                         "trigger": trigger,
+                        "scrollDirection": scroll_direction,
                         "x": hotspot.bounds.x,
                         "y": hotspot.bounds.y,
                         "width": hotspot.bounds.width,

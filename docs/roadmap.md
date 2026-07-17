@@ -16,7 +16,7 @@ This document captures the near-term direction after the initial Rust foundation
 - Add package/archive support so a `.scenecast` directory can become a single portable file when needed.
 - Add JSON schema export or generated bindings for web/native consumers.
 - Add richer validation against capture dimensions (for both hotspots and transition frame compatibility).
-- Add sample bundles that become end-to-end fixtures for click + scroll + transition playback.
+- Expand sample bundles that become end-to-end fixtures for click + scroll + transition playback.
 - Add transition authoring ergonomics beyond manual frame lists (for example, sequence import helpers).
 - Add GitHub Pages examples that publish exported players from `docs/` and `gh-pages`.
 

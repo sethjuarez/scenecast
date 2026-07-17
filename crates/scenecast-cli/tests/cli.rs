@@ -282,6 +282,8 @@ fn add_hotspot_links_scenes_and_rejects_invalid_targets() {
             "48",
             "--trigger",
             "scroll",
+            "--scroll-direction",
+            "down",
         ])
         .assert()
         .success()
@@ -596,6 +598,8 @@ fn export_html_writes_clickthrough_player_and_assets() {
             "1",
             "--trigger",
             "scroll",
+            "--scroll-direction",
+            "down",
         ])
         .assert()
         .success();
@@ -672,6 +676,8 @@ fn add_transition_attaches_frame_sequence_to_hotspot() {
             "100",
             "--trigger",
             "scroll",
+            "--scroll-direction",
+            "down",
         ])
         .assert()
         .success();
@@ -701,10 +707,52 @@ fn add_transition_attaches_frame_sequence_to_hotspot() {
         .hotspot(&HotspotId::new("scroll-pricing").unwrap())
         .unwrap();
     let transition = hotspot.transition.as_ref().unwrap();
+    assert_eq!(
+        hotspot.scroll_direction,
+        scenecast_core::ScrollDirection::Down
+    );
     assert_eq!(transition.default_frame_duration_ms, Some(85));
     assert_eq!(transition.frames.len(), 2);
     assert_eq!(transition.frames[0].path, "captures/scroll-0001.png");
     assert_eq!(transition.frames[1].path, "captures/scroll-0002.png");
+}
+
+#[test]
+fn checked_in_scroll_sample_validates_and_exports() {
+    let temp = tempdir().unwrap();
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let bundle = repo_root.join("examples").join("scroll.scenecast");
+    let output = temp.path().join("scroll-player");
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["validate", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Valid"));
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-html",
+            bundle.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Exported"));
+
+    let html = fs::read_to_string(output.join("index.html")).unwrap();
+    assert!(html.contains("scroll-down"));
+    assert!(html.contains("\"trigger\":\"scroll\""));
+    assert!(html.contains("\"scrollDirection\":\"down\""));
+    assert!(html.contains("\"scrollDirection\":\"up\""));
+    assert!(html.contains("\"kind\":\"frame-sequence\""));
+    assert!(html.contains("back-to-top"));
+    assert!(output.join("captures").join("home-top.svg").is_file());
+    assert!(output.join("captures").join("scroll-0001.svg").is_file());
+    assert!(output.join("captures").join("scroll-0002.svg").is_file());
+    assert!(output.join("captures").join("home-bottom.svg").is_file());
 }
 
 #[test]

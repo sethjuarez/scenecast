@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scenecast Playwright Scroll Sample</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #0f172a;
+      color: white;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 2200px;
+      background:
+        radial-gradient(circle at 80% 10%, rgba(0, 255, 247, 0.22), transparent 28rem),
+        linear-gradient(180deg, #10172a 0%, #17495a 52%, #10172a 100%);
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 82px;
+      margin: 32px 64px 0;
+      padding: 0 32px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 28px;
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(16px);
+    }
+
+    main {
+      padding: 120px 96px 180px;
+    }
+
+    h1 {
+      max-width: 900px;
+      margin: 0;
+      font-size: 76px;
+      line-height: 0.98;
+      letter-spacing: -0.06em;
+    }
+
+    p {
+      max-width: 760px;
+      color: #d7f7ff;
+      font-size: 28px;
+      line-height: 1.45;
+    }
+
+    .scroll-card {
+      position: absolute;
+      right: 128px;
+      top: 690px;
+      width: 260px;
+      padding: 26px;
+      border: 3px solid #00fff7;
+      border-radius: 30px;
+      background: rgba(0, 255, 247, 0.15);
+      text-align: center;
+      box-shadow: 0 0 36px rgba(0, 255, 247, 0.32);
+    }
+
+    .panel-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 36px;
+      margin-top: 720px;
+    }
+
+    .panel {
+      min-height: 260px;
+      padding: 32px;
+      border-radius: 34px;
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .back-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 170px;
+      height: 56px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.16);
+      color: white;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Scenecast</strong>
+    <span>Playwright capture source</span>
+  </header>
+  <main>
+    <h1>Capture scroll states as static scenes.</h1>
+    <p>Playwright can visit a real page, scroll to authored positions, save viewport screenshots, and write a Scenecast manifest that simulates scrolling without shipping a live page.</p>
+    <div class="scroll-card">
+      <strong>Scroll down</strong>
+      <p style="margin: 8px 0 0; font-size: 20px;">wheel anywhere</p>
+    </div>
+    <section class="panel-grid">
+      <article class="panel">
+        <div class="back-button">Back to top</div>
+        <h2>Bottom state</h2>
+        <p>This viewport becomes the target scene.</p>
+      </article>
+      <article class="panel">
+        <h2>Static export</h2>
+        <p>The generated player only needs images, JSON, and hash routes.</p>
+      </article>
+      <article class="panel">
+        <h2>Transition frames</h2>
+        <p>Intermediate screenshots make the navigation feel like a scroll.</p>
+      </article>
+    </section>
+  </main>
+</body>
+</html>
