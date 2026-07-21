@@ -15,7 +15,7 @@ crates\
 `scenecast-core` owns the data model and validation rules that every future surface should share:
 
 - typed `SceneId` and `HotspotId` values with validated serialization and deserialization;
-- `BundleManifest`, `Section`, `SceneGraph`, `Scene`, `Hotspot`, `GuideMark`, `Rect`, and asset primitives;
+- `BundleManifest`, `Section`, `SceneGraph`, `Scene`, `Hotspot`, `GuideMark`, `Rect`, source/provenance, and asset primitives;
 - structural validation for scene graph integrity, hotspot targets, bounds, schema version, and portable asset paths;
 - filesystem validation for exact-case referenced files inside a bundle directory;
 - manifest read/write helpers.
@@ -38,7 +38,7 @@ The CLI validates edits before writing them. It rejects errors introduced by the
 
 ## Bundle boundary
 
-A `.scenecast` is currently a directory with `manifest.json` plus referenced captures/assets. The manifest stores portable paths with `/` separators and no absolute, parent-directory, URL-scheme, or Windows-drive paths. CLI validation checks referenced files with exact case so a bundle authored on Windows or macOS does not accidentally fail later on Linux.
+A `.scenecast` is currently a directory with `manifest.json` plus referenced captures/assets. The manifest stores portable paths with `/` separators and no absolute, parent-directory, URL-scheme, or Windows-drive paths. CLI validation checks referenced files with exact case so a bundle authored on Windows or macOS does not accidentally fail later on Linux. Import provenance records source IDs, labels, timestamps, evidence, and confidence without requiring machine-local source paths in the portable bundle.
 
 ## Static player boundary
 

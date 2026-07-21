@@ -26,6 +26,14 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
       "scenes": ["start"]
     }
   ],
+  "sources": [
+    {
+      "id": "demo-video",
+      "kind": "video",
+      "label": "demo.mp4",
+      "media_type": "video/mp4"
+    }
+  ],
   "graph": {
     "start_scene": "start",
     "scenes": [
@@ -36,6 +44,14 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
         "description": "Landing page with the primary call to action visible.",
         "assets": {
           "screenshot": "captures/start.png"
+        },
+        "provenance": {
+          "source_id": "demo-video",
+          "timestamp_ms": 0,
+          "evidence": [
+            { "kind": "frame", "id": "demo-frame-0001", "label": "Sampled frame 1" }
+          ],
+          "confidence": 1.0
         },
         "guide_marks": [
           {
@@ -81,6 +97,7 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
 - `schema_version` must be `scenecast.bundle.v1`.
 - `title` must not be empty.
 - Optional `sections` define table-of-contents groupings for static players. Section IDs must be portable identifiers, section titles must not be empty, and every referenced scene must exist.
+- Optional `sources` identify source artifacts used by importers. Source IDs must be portable identifiers, unique, and have non-empty labels. Source labels are display names, not required to be portable paths, so importers should not store machine-local absolute paths there.
 - The graph must contain at least one scene.
 - `start_scene` must reference an existing scene.
 - Scene and hotspot identifiers must be unique within their scope.
@@ -101,6 +118,7 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
 - `kind` is advisory in v1. Players should prefer the populated asset fields when deciding how to render a scene.
 - Hotspot `x` and `y` are finite capture-pixel coordinates and may be negative for off-canvas or transitional authoring states; `width` and `height` must be positive.
 - `description` is optional authored text for search, accessibility, narration, and review. `notes` remain optional presenter or authoring notes.
+- `provenance` is optional scene-level import metadata. It references a source by ID, can record a representative `timestamp_ms`, transcript segment IDs, evidence references, and a confidence value between 0 and 1. Provenance is evidence for review and adapters; it does not create hotspots by itself.
 - Guide marks are visible non-navigation overlays. Use hotspots when an area should navigate; use guide marks when an area should draw attention without changing scenes.
 
 ## Authoring flow

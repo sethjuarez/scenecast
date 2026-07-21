@@ -79,7 +79,9 @@ cargo run -p scenecast-cli -- import-video demos\hello.scenecast demo.mp4 --scen
 
 `import-video` shells out to an existing `ffmpeg` executable on the OS. By default it runs `ffmpeg` from `PATH`; use `--ffmpeg <path>` or the `SCENECAST_FFMPEG` environment variable when the binary lives somewhere else.
 
-The command extracts PNG frames into `captures\` and adds each generated frame as a screenshot-backed scene. For example, `--scene-prefix demo` creates scene IDs such as `demo-0001` with screenshots such as `captures/demo-0001.png`.
+The command extracts PNG frames into `captures\` and adds each generated frame as a video-frame scene. For example, `--scene-prefix demo` creates scene IDs such as `demo-0001` with screenshots such as `captures/demo-0001.png`.
+
+Video imports also create a portable source artifact such as `demo-source` and attach scene provenance with the representative timestamp and frame evidence. The source label uses the input file name for review; the manifest does not store the machine-local absolute video path.
 
 Imported frames are linked as a wheel-driven sequence. A fresh starter bundle uses the first imported frame as the start scene, and each imported frame gets a full-frame `next` hotspot to the following frame with a short frame-sequence transition.
 

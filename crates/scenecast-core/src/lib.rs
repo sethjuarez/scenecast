@@ -162,6 +162,8 @@ pub struct BundleManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<Section>,
     pub graph: SceneGraph,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SourceArtifact>,
     #[serde(default)]
     pub assets: Vec<BundleAsset>,
 }
@@ -190,8 +192,10 @@ impl BundleManifest {
                     guide_marks: Vec::new(),
                     description: None,
                     notes: Some(format!("Starter scene for {title}")),
+                    provenance: None,
                 }],
             },
+            sources: Vec::new(),
             assets: Vec::new(),
         }
     }
@@ -282,7 +286,9 @@ impl BundleManifest {
             }
         }
 
+        report.extend(validate_sources(&self.sources));
         report.extend(validate_sections(&self.sections, &self.graph));
+        report.extend(validate_scene_provenance(&self.graph, &self.sources));
         report.extend(self.graph.validate());
         report
     }
@@ -313,6 +319,27 @@ pub struct BundleAsset {
     pub media_type: String,
     #[serde(default)]
     pub role: AssetRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceArtifact {
+    pub id: String,
+    #[serde(default)]
+    pub kind: SourceArtifactKind,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceArtifactKind {
+    #[default]
+    Other,
+    Video,
+    Transcript,
+    Trace,
+    Manual,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +429,8 @@ pub struct Scene {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SceneProvenance>,
 }
 
 impl Scene {
@@ -418,6 +447,7 @@ impl Scene {
             guide_marks: Vec::new(),
             description: None,
             notes: None,
+            provenance: None,
         }
     }
 
@@ -545,6 +575,40 @@ impl Scene {
 
         report
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneProvenance {
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript_segment_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceRef {
+    #[serde(default)]
+    pub kind: EvidenceKind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvidenceKind {
+    #[default]
+    Other,
+    Frame,
+    TranscriptSegment,
+    Event,
+    Heuristic,
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -747,6 +811,32 @@ pub enum ValidationError {
     EmptyAssetMediaType {
         path: String,
     },
+    InvalidSourceId {
+        source_id: String,
+        reason: &'static str,
+    },
+    DuplicateSourceId {
+        source_id: String,
+    },
+    EmptySourceLabel {
+        source_id: String,
+    },
+    EmptySourceMediaType {
+        source_id: String,
+    },
+    MissingProvenanceSource {
+        scene_id: SceneId,
+        source_id: String,
+    },
+    InvalidProvenanceConfidence {
+        scene_id: SceneId,
+        confidence: f32,
+    },
+    InvalidEvidenceId {
+        scene_id: SceneId,
+        evidence_id: String,
+        reason: &'static str,
+    },
     InvalidSectionId {
         section_id: String,
         reason: &'static str,
@@ -845,6 +935,49 @@ impl fmt::Display for ValidationError {
                 write!(
                     formatter,
                     "bundle asset `{path}` media_type must not be empty"
+                )
+            }
+            Self::InvalidSourceId { source_id, reason } => {
+                write!(formatter, "source id `{source_id}` is not valid: {reason}")
+            }
+            Self::DuplicateSourceId { source_id } => {
+                write!(formatter, "source id `{source_id}` is duplicated")
+            }
+            Self::EmptySourceLabel { source_id } => {
+                write!(formatter, "source `{source_id}` label must not be empty")
+            }
+            Self::EmptySourceMediaType { source_id } => {
+                write!(
+                    formatter,
+                    "source `{source_id}` media_type must not be empty when provided"
+                )
+            }
+            Self::MissingProvenanceSource {
+                scene_id,
+                source_id,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` references missing provenance source `{source_id}`"
+                )
+            }
+            Self::InvalidProvenanceConfidence {
+                scene_id,
+                confidence,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` provenance confidence must be between 0 and 1 (got `{confidence}`)"
+                )
+            }
+            Self::InvalidEvidenceId {
+                scene_id,
+                evidence_id,
+                reason,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` evidence id `{evidence_id}` is not valid: {reason}"
                 )
             }
             Self::InvalidSectionId { section_id, reason } => {
@@ -989,6 +1122,90 @@ impl fmt::Display for ValidationError {
             }
         }
     }
+}
+
+fn validate_sources(sources: &[SourceArtifact]) -> ValidationReport {
+    let mut report = ValidationReport::default();
+    let mut source_ids = HashSet::new();
+
+    for source in sources {
+        if let Err(reason) = validate_identifier(&source.id) {
+            report.errors.push(ValidationError::InvalidSourceId {
+                source_id: source.id.clone(),
+                reason,
+            });
+        }
+
+        if !source_ids.insert(source.id.clone()) {
+            report.errors.push(ValidationError::DuplicateSourceId {
+                source_id: source.id.clone(),
+            });
+        }
+
+        if source.label.trim().is_empty() {
+            report.errors.push(ValidationError::EmptySourceLabel {
+                source_id: source.id.clone(),
+            });
+        }
+
+        if source
+            .media_type
+            .as_deref()
+            .is_some_and(|media_type| media_type.trim().is_empty())
+        {
+            report.errors.push(ValidationError::EmptySourceMediaType {
+                source_id: source.id.clone(),
+            });
+        }
+    }
+
+    report
+}
+
+fn validate_scene_provenance(graph: &SceneGraph, sources: &[SourceArtifact]) -> ValidationReport {
+    let mut report = ValidationReport::default();
+    let source_ids = sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect::<HashSet<_>>();
+
+    for scene in &graph.scenes {
+        let Some(provenance) = &scene.provenance else {
+            continue;
+        };
+
+        if !source_ids.contains(provenance.source_id.as_str()) {
+            report
+                .errors
+                .push(ValidationError::MissingProvenanceSource {
+                    scene_id: scene.id.clone(),
+                    source_id: provenance.source_id.clone(),
+                });
+        }
+
+        if let Some(confidence) = provenance.confidence
+            && (!confidence.is_finite() || !(0.0..=1.0).contains(&confidence))
+        {
+            report
+                .errors
+                .push(ValidationError::InvalidProvenanceConfidence {
+                    scene_id: scene.id.clone(),
+                    confidence,
+                });
+        }
+
+        for evidence in &provenance.evidence {
+            if let Err(reason) = validate_identifier(&evidence.id) {
+                report.errors.push(ValidationError::InvalidEvidenceId {
+                    scene_id: scene.id.clone(),
+                    evidence_id: evidence.id.clone(),
+                    reason,
+                });
+            }
+        }
+    }
+
+    report
 }
 
 fn validate_sections(sections: &[Section], graph: &SceneGraph) -> ValidationReport {
@@ -1337,6 +1554,7 @@ mod tests {
             guide_marks: Vec::new(),
             description: None,
             notes: None,
+            provenance: None,
         });
 
         let report = manifest.validate();
@@ -1406,6 +1624,68 @@ mod tests {
                 .filter(|error| matches!(error, ValidationError::InvalidAssetPath { .. }))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn validation_checks_source_artifacts_and_scene_provenance() {
+        let mut manifest = BundleManifest::starter("Demo");
+        manifest.sources.push(SourceArtifact {
+            id: "video-source".to_owned(),
+            kind: SourceArtifactKind::Video,
+            label: "demo.mp4".to_owned(),
+            media_type: Some("video/mp4".to_owned()),
+        });
+        manifest.graph.scenes[0].provenance = Some(SceneProvenance {
+            source_id: "video-source".to_owned(),
+            timestamp_ms: Some(2_500),
+            transcript_segment_ids: vec!["seg-1".to_owned()],
+            evidence: vec![EvidenceRef {
+                kind: EvidenceKind::Frame,
+                id: "frame-0001".to_owned(),
+                label: Some("Sampled frame 1".to_owned()),
+            }],
+            confidence: Some(0.8),
+        });
+
+        assert!(manifest.validate().is_valid());
+
+        manifest.graph.scenes[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .source_id = "missing".to_owned();
+        manifest.graph.scenes[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .confidence = Some(1.5);
+        manifest.graph.scenes[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .evidence[0]
+            .id = "bad evidence".to_owned();
+
+        let report = manifest.validate();
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::MissingProvenanceSource { .. }))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidProvenanceConfidence { .. }))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidEvidenceId { .. }))
         );
     }
 

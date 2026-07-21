@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use predicates::prelude::*;
 use scenecast_core::{
-    BundleManifest, GuideMarkId, GuideMarkStyle, HotspotId, InteractionTrigger, SceneId,
-    manifest_path,
+    BundleManifest, GuideMarkId, GuideMarkStyle, HotspotId, InteractionTrigger, SceneId, SceneKind,
+    SourceArtifactKind, manifest_path,
 };
 use tempfile::tempdir;
 
@@ -474,20 +474,32 @@ fn import_video_extracts_frames_with_ffmpeg_and_adds_scenes() {
         .graph
         .scene(&SceneId::new("clip-0001").unwrap())
         .unwrap();
+    assert_eq!(manifest.sources.len(), 1);
+    assert_eq!(manifest.sources[0].id, "clip-source");
+    assert_eq!(manifest.sources[0].kind, SourceArtifactKind::Video);
+    assert_eq!(manifest.sources[0].label, "demo.mp4");
+    assert_eq!(manifest.sources[0].media_type.as_deref(), Some("video/mp4"));
     assert_eq!(
         manifest.graph.start_scene,
         SceneId::new("clip-0001").unwrap()
     );
+    assert_eq!(imported.kind, SceneKind::VideoFrame);
     assert_eq!(
         imported.assets.screenshot.as_deref(),
         Some("captures/clip-0001.png")
     );
+    let provenance = imported.provenance.as_ref().unwrap();
+    assert_eq!(provenance.source_id, "clip-source");
+    assert_eq!(provenance.timestamp_ms, Some(0));
+    assert_eq!(provenance.confidence, Some(1.0));
+    assert_eq!(provenance.evidence[0].id, "clip-frame-0001");
 }
 
 #[test]
 fn import_video_links_multiple_frames_as_clickthrough_sequence() {
     let temp = tempdir().unwrap();
     let bundle = temp.path().join("demo.scenecast");
+    let output = temp.path().join("player");
     let input = temp.path().join("demo.mp4");
     fs::write(&input, []).unwrap();
     let fake_ffmpeg = write_fake_ffmpeg_sequence(temp.path());
@@ -538,6 +550,9 @@ fn import_video_links_multiple_frames_as_clickthrough_sequence() {
         .graph
         .scene(&SceneId::new("clip-0001").unwrap())
         .unwrap();
+    assert_eq!(manifest.sources[0].id, "clip-source");
+    assert_eq!(first.provenance.as_ref().unwrap().source_id, "clip-source");
+    assert_eq!(first.provenance.as_ref().unwrap().timestamp_ms, Some(0));
     let next = first.hotspot(&HotspotId::new("next").unwrap()).unwrap();
     assert_eq!(next.target, SceneId::new("clip-0002").unwrap());
     assert_eq!(next.trigger, InteractionTrigger::Scroll);
@@ -553,6 +568,38 @@ fn import_video_links_multiple_frames_as_clickthrough_sequence() {
         .scene(&SceneId::new("clip-0002").unwrap())
         .unwrap();
     assert!(second.hotspot(&HotspotId::new("next").unwrap()).is_none());
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["validate", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Valid"));
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-html",
+            bundle.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Exported"));
+
+    let html = fs::read_to_string(output.join("index.html")).unwrap();
+    assert!(html.contains("\"startScene\":\"clip-0001\""));
+    assert!(html.contains("\"sceneOrder\":[\"clip-0001\",\"clip-0002\"]"));
+    assert!(html.contains("\"clip-0001\":"));
+    assert!(html.contains("\"clip-0002\":"));
+    assert!(html.contains("\"target\":\"clip-0002\""));
+    assert!(html.contains("\"trigger\":\"scroll\""));
+    assert!(html.contains("\"kind\":\"frame-sequence\""));
+    assert!(html.contains("\"sources\":[{\"id\":\"clip-source\""));
+    assert!(html.contains("\"sourceId\":\"clip-source\""));
+    assert!(html.contains("\"timestampMs\":0"));
+    assert!(output.join("captures").join("clip-0001.png").is_file());
+    assert!(output.join("captures").join("clip-0002.png").is_file());
 }
 
 #[test]
