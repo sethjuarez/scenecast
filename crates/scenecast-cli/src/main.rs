@@ -6,8 +6,9 @@ use std::process::Command as ProcessCommand;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use scenecast_core::{
-    BundleManifest, GuideMark, GuideMarkId, GuideMarkStyle, Hotspot, HotspotId, InteractionTrigger,
-    MANIFEST_FILE_NAME, Rect, Scene, SceneId, ScrollDirection, Section, Transition,
+    BundleManifest, EvidenceKind, EvidenceRef, GuideMark, GuideMarkId, GuideMarkStyle, Hotspot,
+    HotspotId, InteractionTrigger, MANIFEST_FILE_NAME, Rect, Scene, SceneId, SceneKind,
+    SceneProvenance, ScrollDirection, Section, SourceArtifact, SourceArtifactKind, Transition,
     TransitionFrame, TransitionKind, ValidationReport, manifest_path, read_manifest,
     validate_referenced_files, write_manifest,
 };
@@ -721,6 +722,10 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
         .scene_prefix
         .map(|value| slugify_identifier(&value))
         .unwrap_or_else(|| default_scene_prefix(&args.input));
+    let source_id = format!("{prefix}-source");
+    if manifest.sources.iter().any(|source| source.id == source_id) {
+        bail!("source `{source_id}` already exists");
+    }
     let output_pattern = captures_dir.join(format!("{prefix}-%04d.png"));
     let ffmpeg = ffmpeg_path(args.ffmpeg);
 
@@ -764,6 +769,13 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
         }
     }
 
+    manifest.sources.push(SourceArtifact {
+        id: source_id.clone(),
+        kind: SourceArtifactKind::Video,
+        label: source_label(&args.input),
+        media_type: media_type_for_path(&args.input).map(str::to_owned),
+    });
+
     for (index, frame) in frames.iter().enumerate() {
         let scene_id = frame_scene_ids[index].clone();
         let next_scene_id = frame_scene_ids.get(index + 1).cloned();
@@ -776,6 +788,18 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
             format!("{} frame {}", prefix, index + 1),
             Some(screenshot),
         );
+        scene.kind = SceneKind::VideoFrame;
+        scene.provenance = Some(SceneProvenance {
+            source_id: source_id.clone(),
+            timestamp_ms: Some(sample_timestamp_ms(index, args.every_seconds)),
+            transcript_segment_ids: Vec::new(),
+            evidence: vec![EvidenceRef {
+                kind: EvidenceKind::Frame,
+                id: format!("{}-frame-{:04}", prefix, index + 1),
+                label: Some(format!("Sampled frame {}", index + 1)),
+            }],
+            confidence: Some(1.0),
+        });
         if let (Some(target), Some(next_frame)) = (next_scene_id, next_frame) {
             let transition_frame_path = format!(
                 "captures/{}",
@@ -836,6 +860,35 @@ fn video_filter(every_seconds: f32, crop: Option<Crop>) -> String {
 fn default_transition_duration_ms(every_seconds: f32) -> u32 {
     let milliseconds = (every_seconds * 1000.0).round();
     milliseconds.clamp(1.0, u32::MAX as f32) as u32
+}
+
+fn sample_timestamp_ms(index: usize, every_seconds: f32) -> u64 {
+    ((index as f64) * f64::from(every_seconds) * 1000.0).round() as u64
+}
+
+fn source_label(input: &Path) -> String {
+    input
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("source video")
+        .to_owned()
+}
+
+fn media_type_for_path(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("mp4") | Some("m4v") => Some("video/mp4"),
+        Some("mov") => Some("video/quicktime"),
+        Some("webm") => Some("video/webm"),
+        Some("mkv") => Some("video/x-matroska"),
+        Some("avi") => Some("video/x-msvideo"),
+        _ => None,
+    }
 }
 
 fn is_untouched_starter(manifest: &BundleManifest) -> bool {
@@ -1331,6 +1384,25 @@ fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
         .map(|scene| scene.id.as_str().to_owned())
         .collect::<Vec<_>>();
     let sections = export_sections(manifest, &scene_order);
+    let sources = manifest
+        .sources
+        .iter()
+        .map(|source| {
+            let kind = match source.kind {
+                SourceArtifactKind::Video => "video",
+                SourceArtifactKind::Transcript => "transcript",
+                SourceArtifactKind::Trace => "trace",
+                SourceArtifactKind::Manual => "manual",
+                SourceArtifactKind::Other => "other",
+            };
+            json!({
+                "id": source.id,
+                "kind": kind,
+                "label": source.label,
+                "mediaType": source.media_type,
+            })
+        })
+        .collect::<Vec<_>>();
     let scenes = manifest
         .graph
         .scenes
@@ -1398,6 +1470,29 @@ fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
                     })
                 })
                 .collect::<Vec<_>>();
+            let provenance = scene.provenance.as_ref().map(|provenance| {
+                json!({
+                    "sourceId": provenance.source_id,
+                    "timestampMs": provenance.timestamp_ms,
+                    "transcriptSegmentIds": provenance.transcript_segment_ids,
+                    "evidence": provenance.evidence.iter().map(|evidence| {
+                        let kind = match evidence.kind {
+                            EvidenceKind::Frame => "frame",
+                            EvidenceKind::TranscriptSegment => "transcript-segment",
+                            EvidenceKind::Event => "event",
+                            EvidenceKind::Heuristic => "heuristic",
+                            EvidenceKind::Agent => "agent",
+                            EvidenceKind::Other => "other",
+                        };
+                        json!({
+                            "kind": kind,
+                            "id": evidence.id,
+                            "label": evidence.label,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "confidence": provenance.confidence,
+                })
+            });
             (
                 scene.id.as_str().to_owned(),
                 json!({
@@ -1408,6 +1503,7 @@ fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
                     "video": scene.assets.video,
                     "hotspots": hotspots,
                     "guideMarks": guide_marks,
+                    "provenance": provenance,
                 }),
             )
         })
@@ -1418,6 +1514,7 @@ fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
         "startScene": manifest.graph.start_scene.as_str(),
         "sceneOrder": scene_order,
         "sections": sections,
+        "sources": sources,
         "scenes": scenes,
     })
 }

@@ -12,6 +12,7 @@ This document captures the near-term direction after the initial Rust foundation
 
 ## Remaining foundation work
 
+- Keep ingestion acceptance fixtures focused on real source artifact -> `.scenecast` bundle -> validation -> static HTML export before freezing generated contracts.
 - Add an `add-asset` command for bundle-level supporting assets and non-capture media references.
 - Add package/archive support so a `.scenecast` directory can become a single portable file when needed.
 - Add JSON schema export or generated bindings for web/native consumers.

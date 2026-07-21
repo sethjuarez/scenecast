@@ -34,6 +34,16 @@ scene.
 - `examples\scroll.scenecast` demonstrates a wheel-triggered hotspot, frame-sequence transition, guide mark, and click hotspot in a fully static bundle.
 - `examples\playwright-scroll-capture` is a Playwright starter that captures a scrollable HTML page into a generated `.scenecast` bundle.
 
+## Ingestion proof loop
+
+New importers should prove the same path before they become part of the reusable contract:
+
+```text
+source artifact -> .scenecast bundle -> validate -> export-html -> static player smoke check
+```
+
+The checked-in CLI tests exercise this for ffmpeg-backed frame extraction and the scroll sample fixture, so new adapters can add real-world fixtures without changing the player contract first.
+
 ## Development
 
 ```powershell
