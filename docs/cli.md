@@ -87,6 +87,18 @@ Imported frames are linked as a wheel-driven sequence. A fresh starter bundle us
 
 Use `--crop x,y,width,height` to remove browser chrome or other recording matte before frames are extracted. The crop is applied by ffmpeg before sampling frames.
 
+### Import a transcript-backed draft
+
+If a same-basename `.srt` or `.vtt` exists beside the video, `import-video` detects it automatically. Pass `--transcript path\to\captions.vtt` to select a different sidecar explicitly:
+
+```powershell
+cargo run -p scenecast-cli -- import-video demos\hello.scenecast recordings\demo.mp4 --scene-prefix demo --transcript recordings\demo.vtt
+```
+
+Scenecast parses timed cues into stable transcript segment evidence and groups them deterministically into draft scenes. It starts a new candidate at substantial pauses, topic-cue boundaries, maximum duration, or maximum text length, then samples a representative frame timestamp for each candidate. The bundle records both video-frame and transcript evidence, transcript segment IDs, and the draft text in the scene description and notes.
+
+Transcript imports are drafts, not inferred UI maps. Scenecast does not create click hotspots from spoken text or claim that a phrase identifies a clickable control. Candidate scenes are only linked linearly with the existing scroll-style next navigation, ready for later review and authoring.
+
 ## Export a local HTML player
 
 ```powershell

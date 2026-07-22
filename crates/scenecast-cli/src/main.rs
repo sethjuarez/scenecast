@@ -156,6 +156,9 @@ enum Command {
         /// Crop source video before extracting frames, as x,y,width,height.
         #[arg(long)]
         crop: Option<String>,
+        /// Optional SRT or WebVTT transcript. Defaults to a same-basename .srt or .vtt sidecar.
+        #[arg(long)]
+        transcript: Option<PathBuf>,
         /// ffmpeg executable to run. Defaults to SCENECAST_FFMPEG or ffmpeg.
         #[arg(long)]
         ffmpeg: Option<PathBuf>,
@@ -331,6 +334,7 @@ fn run(cli: Cli) -> Result<()> {
             scene_prefix,
             every_seconds,
             crop,
+            transcript,
             ffmpeg,
         } => import_video(
             &bundle,
@@ -339,6 +343,7 @@ fn run(cli: Cli) -> Result<()> {
                 scene_prefix,
                 every_seconds,
                 crop,
+                transcript,
                 ffmpeg,
             },
         ),
@@ -661,6 +666,7 @@ struct ImportVideoArgs {
     scene_prefix: Option<String>,
     every_seconds: f32,
     crop: Option<String>,
+    transcript: Option<PathBuf>,
     ffmpeg: Option<PathBuf>,
 }
 
@@ -726,6 +732,19 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
     if manifest.sources.iter().any(|source| source.id == source_id) {
         bail!("source `{source_id}` already exists");
     }
+    let transcript = discover_transcript_sidecar(&args.input, args.transcript.as_deref())?
+        .map(|path| {
+            parse_transcript(&path, &prefix).map(|cues| (path, group_transcript_cues(cues)))
+        })
+        .transpose()?;
+    if transcript.as_ref().is_some_and(|_| {
+        manifest
+            .sources
+            .iter()
+            .any(|source| source.id == format!("{prefix}-transcript"))
+    }) {
+        bail!("source `{}-transcript` already exists", prefix);
+    }
     let output_pattern = captures_dir.join(format!("{prefix}-%04d.png"));
     let ffmpeg = ffmpeg_path(args.ffmpeg);
 
@@ -734,22 +753,33 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
         bail!("capture prefix `{prefix}` already has extracted frames");
     }
 
-    let video_filter = video_filter(args.every_seconds, crop);
-    let status = ProcessCommand::new(&ffmpeg)
-        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
-        .arg(&args.input)
-        .args(["-vf", &video_filter, "-start_number", "1"])
-        .arg(&output_pattern)
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to run ffmpeg at `{}`; install ffmpeg or pass --ffmpeg",
-                ffmpeg.display()
-            )
-        })?;
+    if let Some((_, candidates)) = &transcript {
+        extract_transcript_candidate_frames(
+            &ffmpeg,
+            &args.input,
+            crop,
+            candidates,
+            &captures_dir,
+            &prefix,
+        )?;
+    } else {
+        let video_filter = video_filter(args.every_seconds, crop);
+        let status = ProcessCommand::new(&ffmpeg)
+            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+            .arg(&args.input)
+            .args(["-vf", &video_filter, "-start_number", "1"])
+            .arg(&output_pattern)
+            .status()
+            .with_context(|| {
+                format!(
+                    "failed to run ffmpeg at `{}`; install ffmpeg or pass --ffmpeg",
+                    ffmpeg.display()
+                )
+            })?;
 
-    if !status.success() {
-        bail!("ffmpeg failed with status {status}");
+        if !status.success() {
+            bail!("ffmpeg failed with status {status}");
+        }
     }
 
     let frames = extracted_frames(&captures_dir, &prefix)?;
@@ -775,6 +805,14 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
         label: source_label(&args.input),
         media_type: media_type_for_path(&args.input).map(str::to_owned),
     });
+    if let Some((transcript_path, _)) = &transcript {
+        manifest.sources.push(SourceArtifact {
+            id: format!("{prefix}-transcript"),
+            kind: SourceArtifactKind::Transcript,
+            label: source_label(transcript_path),
+            media_type: transcript_media_type(transcript_path).map(str::to_owned),
+        });
+    }
 
     for (index, frame) in frames.iter().enumerate() {
         let scene_id = frame_scene_ids[index].clone();
@@ -783,22 +821,57 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
         let dimensions = png_dimensions(frame).unwrap_or((1, 1));
 
         let screenshot = format!("captures/{}", frame.file_name().unwrap().to_string_lossy());
+        let candidate = transcript
+            .as_ref()
+            .map(|(_, candidates)| &candidates[index]);
         let mut scene = Scene::screenshot(
             scene_id,
-            format!("{} frame {}", prefix, index + 1),
+            candidate
+                .map(|_| format!("{prefix} draft {:04}", index + 1))
+                .unwrap_or_else(|| format!("{prefix} frame {}", index + 1)),
             Some(screenshot),
         );
         scene.kind = SceneKind::VideoFrame;
+        if let Some(candidate) = candidate {
+            scene.description = Some(format!("Transcript draft: {}", candidate.text));
+            scene.notes = Some(format!(
+                "Transcript draft. No clickable UI is inferred from transcript text.\n\n{}",
+                candidate.text
+            ));
+        }
+        let mut evidence = vec![EvidenceRef {
+            kind: EvidenceKind::Frame,
+            id: format!("{}-frame-{:04}", prefix, index + 1),
+            label: Some(
+                candidate
+                    .map(|candidate| {
+                        format!(
+                            "Representative frame at {}",
+                            format_timestamp_ms(candidate.representative_timestamp_ms())
+                        )
+                    })
+                    .unwrap_or_else(|| format!("Sampled frame {}", index + 1)),
+            ),
+        }];
+        if let Some(candidate) = candidate {
+            evidence.extend(candidate.cues.iter().map(|cue| EvidenceRef {
+                kind: EvidenceKind::TranscriptSegment,
+                id: cue.id.clone(),
+                label: Some(cue.text.clone()),
+            }));
+        }
         scene.provenance = Some(SceneProvenance {
             source_id: source_id.clone(),
-            timestamp_ms: Some(sample_timestamp_ms(index, args.every_seconds)),
-            transcript_segment_ids: Vec::new(),
-            evidence: vec![EvidenceRef {
-                kind: EvidenceKind::Frame,
-                id: format!("{}-frame-{:04}", prefix, index + 1),
-                label: Some(format!("Sampled frame {}", index + 1)),
-            }],
-            confidence: Some(1.0),
+            timestamp_ms: Some(
+                candidate
+                    .map(TranscriptCandidate::representative_timestamp_ms)
+                    .unwrap_or_else(|| sample_timestamp_ms(index, args.every_seconds)),
+            ),
+            transcript_segment_ids: candidate
+                .map(|candidate| candidate.cues.iter().map(|cue| cue.id.clone()).collect())
+                .unwrap_or_default(),
+            evidence,
+            confidence: Some(if candidate.is_some() { 0.6 } else { 1.0 }),
         });
         if let (Some(target), Some(next_frame)) = (next_scene_id, next_frame) {
             let transition_frame_path = format!(
@@ -808,7 +881,11 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
             scene.hotspots.push(
                 Hotspot::new(
                     HotspotId::new("next").expect("static hotspot id is valid"),
-                    "Next frame",
+                    if candidate.is_some() {
+                        "Next draft scene"
+                    } else {
+                        "Next frame"
+                    },
                     target,
                     Rect::new(0.0, 0.0, dimensions.0 as f32, dimensions.1 as f32),
                 )
@@ -849,6 +926,235 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptCue {
+    id: String,
+    start_ms: u64,
+    end_ms: u64,
+    text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptCandidate {
+    cues: Vec<TranscriptCue>,
+    start_ms: u64,
+    end_ms: u64,
+    text: String,
+}
+
+impl TranscriptCandidate {
+    fn representative_timestamp_ms(&self) -> u64 {
+        self.start_ms + (self.end_ms - self.start_ms) / 2
+    }
+}
+
+const TRANSCRIPT_PAUSE_BOUNDARY_MS: u64 = 1_500;
+const TRANSCRIPT_MAX_DURATION_MS: u64 = 15_000;
+const TRANSCRIPT_MAX_TEXT_LENGTH: usize = 280;
+
+fn discover_transcript_sidecar(input: &Path, explicit: Option<&Path>) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit {
+        if !path.is_file() {
+            bail!(
+                "transcript `{}` does not exist or is not a file",
+                path.display()
+            );
+        }
+        return Ok(Some(path.to_owned()));
+    }
+
+    for extension in ["srt", "vtt"] {
+        let candidate = input.with_extension(extension);
+        if candidate.is_file() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_transcript(path: &Path, prefix: &str) -> Result<Vec<TranscriptCue>> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read transcript `{}`", path.display()))?;
+    let is_vtt = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("vtt"));
+    let mut cues = Vec::new();
+
+    for block in contents.replace('\r', "").split("\n\n") {
+        let lines = block
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        if lines.is_empty() || (is_vtt && lines[0].starts_with("WEBVTT")) {
+            continue;
+        }
+        let Some(timing_index) = lines.iter().position(|line| line.contains("-->")) else {
+            continue;
+        };
+        let Some((start, end)) = lines[timing_index].split_once("-->") else {
+            continue;
+        };
+        let start_ms = parse_timestamp_ms(start.trim()).with_context(|| {
+            format!(
+                "invalid transcript start timestamp `{}` in `{}`",
+                start.trim(),
+                path.display()
+            )
+        })?;
+        let end_ms =
+            parse_timestamp_ms(end.split_whitespace().next().unwrap_or("")).with_context(|| {
+                format!(
+                    "invalid transcript end timestamp `{}` in `{}`",
+                    end.trim(),
+                    path.display()
+                )
+            })?;
+        if end_ms <= start_ms {
+            bail!(
+                "transcript cue in `{}` must end after it starts",
+                path.display()
+            );
+        }
+        let text = lines[timing_index + 1..].join(" ");
+        if text.is_empty() {
+            continue;
+        }
+        cues.push(TranscriptCue {
+            id: String::new(),
+            start_ms,
+            end_ms,
+            text,
+        });
+    }
+
+    if cues.is_empty() {
+        bail!(
+            "transcript `{}` contains no timed text cues",
+            path.display()
+        );
+    }
+    for (index, cue) in cues.iter_mut().enumerate() {
+        cue.id = format!("{prefix}-transcript-{:04}", index + 1);
+    }
+    Ok(cues)
+}
+
+fn parse_timestamp_ms(value: &str) -> Result<u64> {
+    let normalized = value.replace(',', ".");
+    let parts = normalized.split(':').collect::<Vec<_>>();
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [hours, minutes, seconds] => (
+            hours.parse::<u64>()?,
+            minutes.parse::<u64>()?,
+            seconds.parse::<f64>()?,
+        ),
+        [minutes, seconds] => (0, minutes.parse::<u64>()?, seconds.parse::<f64>()?),
+        _ => bail!("expected HH:MM:SS.mmm or MM:SS.mmm"),
+    };
+    if minutes >= 60 || !seconds.is_finite() || !(0.0..60.0).contains(&seconds) {
+        bail!("timestamp values are out of range");
+    }
+    Ok((hours * 3_600_000) + (minutes * 60_000) + (seconds * 1000.0).round() as u64)
+}
+
+fn group_transcript_cues(cues: Vec<TranscriptCue>) -> Vec<TranscriptCandidate> {
+    let mut candidates = Vec::new();
+    let mut current = Vec::new();
+    for cue in cues {
+        let should_split = current.last().is_some_and(|previous: &TranscriptCue| {
+            cue.start_ms.saturating_sub(previous.end_ms) >= TRANSCRIPT_PAUSE_BOUNDARY_MS
+                || cue.end_ms.saturating_sub(current[0].start_ms) > TRANSCRIPT_MAX_DURATION_MS
+                || transcript_text_length(&current) + cue.text.len() > TRANSCRIPT_MAX_TEXT_LENGTH
+                || (is_topic_cue(&cue.text) && !current.is_empty())
+        });
+        if should_split {
+            candidates.push(transcript_candidate(std::mem::take(&mut current)));
+        }
+        current.push(cue);
+    }
+    if !current.is_empty() {
+        candidates.push(transcript_candidate(current));
+    }
+    candidates
+}
+
+fn transcript_candidate(cues: Vec<TranscriptCue>) -> TranscriptCandidate {
+    TranscriptCandidate {
+        start_ms: cues.first().expect("candidate has cues").start_ms,
+        end_ms: cues.last().expect("candidate has cues").end_ms,
+        text: cues
+            .iter()
+            .map(|cue| cue.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        cues,
+    }
+}
+
+fn transcript_text_length(cues: &[TranscriptCue]) -> usize {
+    cues.iter().map(|cue| cue.text.len()).sum::<usize>() + cues.len().saturating_sub(1)
+}
+
+fn is_topic_cue(text: &str) -> bool {
+    let normalized = text.trim_start().to_ascii_lowercase();
+    [
+        "next ", "now ", "first ", "then ", "finally ", "let's ", "we'll ",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix))
+}
+
+fn extract_transcript_candidate_frames(
+    ffmpeg: &Path,
+    input: &Path,
+    crop: Option<Crop>,
+    candidates: &[TranscriptCandidate],
+    captures_dir: &Path,
+    prefix: &str,
+) -> Result<()> {
+    for (index, candidate) in candidates.iter().enumerate() {
+        let output = captures_dir.join(format!("{prefix}-{:04}.png", index + 1));
+        let timestamp_seconds = format!(
+            "{:.3}",
+            candidate.representative_timestamp_ms() as f64 / 1000.0
+        );
+        let mut command = ProcessCommand::new(ffmpeg);
+        command
+            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-ss"])
+            .arg(timestamp_seconds)
+            .arg("-i")
+            .arg(input);
+        if let Some(crop) = crop {
+            command.args(["-vf", crop.ffmpeg_filter().as_str()]);
+        }
+        let status = command
+            .args(["-frames:v", "1"])
+            .arg(&output)
+            .status()
+            .with_context(|| {
+                format!(
+                    "failed to run ffmpeg at `{}`; install ffmpeg or pass --ffmpeg",
+                    ffmpeg.display()
+                )
+            })?;
+        if !status.success() {
+            bail!("ffmpeg failed with status {status}");
+        }
+    }
+    Ok(())
+}
+
+fn format_timestamp_ms(timestamp_ms: u64) -> String {
+    format!(
+        "{:02}:{:02}.{:03}",
+        timestamp_ms / 60_000,
+        (timestamp_ms / 1_000) % 60,
+        timestamp_ms % 1_000
+    )
+}
+
 fn video_filter(every_seconds: f32, crop: Option<Crop>) -> String {
     let fps = format!("fps=1/{every_seconds}");
     match crop {
@@ -887,6 +1193,19 @@ fn media_type_for_path(path: &Path) -> Option<&'static str> {
         Some("webm") => Some("video/webm"),
         Some("mkv") => Some("video/x-matroska"),
         Some("avi") => Some("video/x-msvideo"),
+        _ => None,
+    }
+}
+
+fn transcript_media_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("srt") => Some("application/x-subrip"),
+        Some("vtt") => Some("text/vtt"),
         _ => None,
     }
 }
@@ -1626,4 +1945,60 @@ fn reject_validation_errors(context: &str, report: &ValidationReport) -> Result<
         eprintln!("error: {error}");
     }
     bail!("{context} is invalid");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_webvtt_cues_with_stable_segment_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("demo.vtt");
+        fs::write(
+            &transcript,
+            "WEBVTT\n\n00:00.000 --> 00:01.250\nFirst cue.\n\n00:03.000 --> 00:04.000 align:start\nSecond cue.\n",
+        )
+        .unwrap();
+
+        let cues = parse_transcript(&transcript, "demo").unwrap();
+
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].id, "demo-transcript-0001");
+        assert_eq!(cues[0].start_ms, 0);
+        assert_eq!(cues[0].end_ms, 1_250);
+        assert_eq!(cues[1].id, "demo-transcript-0002");
+        assert_eq!(cues[1].start_ms, 3_000);
+    }
+
+    #[test]
+    fn groups_cues_at_pause_boundaries() {
+        let cues = vec![
+            TranscriptCue {
+                id: "demo-transcript-0001".to_owned(),
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "First cue.".to_owned(),
+            },
+            TranscriptCue {
+                id: "demo-transcript-0002".to_owned(),
+                start_ms: 1_200,
+                end_ms: 2_000,
+                text: "Second cue.".to_owned(),
+            },
+            TranscriptCue {
+                id: "demo-transcript-0003".to_owned(),
+                start_ms: 4_000,
+                end_ms: 5_000,
+                text: "Third cue.".to_owned(),
+            },
+        ];
+
+        let candidates = group_transcript_cues(cues);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].cues.len(), 2);
+        assert_eq!(candidates[0].representative_timestamp_ms(), 1_000);
+        assert_eq!(candidates[1].cues[0].id, "demo-transcript-0003");
+    }
 }
