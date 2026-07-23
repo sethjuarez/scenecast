@@ -99,6 +99,14 @@ Scenecast parses timed cues into stable transcript segment evidence and groups t
 
 Transcript imports are drafts, not inferred UI maps. Scenecast does not create click hotspots from spoken text or claim that a phrase identifies a clickable control. Candidate scenes are only linked linearly with the existing scroll-style next navigation, ready for later review and authoring.
 
+## Export an editorial draft
+
+```powershell
+cargo run -p scenecast-cli -- export-draft demos\hello.scenecast demos\hello-editorial-draft
+```
+
+`export-draft` writes `draft.json` in the requested output directory using the generic `editorial-draft` schema version `1`. It copies each candidate screenshot beneath `assets/`, records a SHA-256 checksum, and rewrites paths so they resolve without the original bundle. Each scene includes its stable ID, transcript start/end range, verbatim transcript, empty `actions`, source-qualified transcript evidence, and notes. The empty action list is intentional: editorial tools must not mistake transcript text for inferred clickable UI.
+
 ## Export a local HTML player
 
 ```powershell

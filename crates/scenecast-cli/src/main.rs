@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -8,11 +8,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use scenecast_core::{
     BundleManifest, EvidenceKind, EvidenceRef, GuideMark, GuideMarkId, GuideMarkStyle, Hotspot,
     HotspotId, InteractionTrigger, MANIFEST_FILE_NAME, Rect, Scene, SceneId, SceneKind,
-    SceneProvenance, ScrollDirection, Section, SourceArtifact, SourceArtifactKind, Transition,
-    TransitionFrame, TransitionKind, ValidationReport, manifest_path, read_manifest,
-    validate_referenced_files, write_manifest,
+    SceneProvenance, ScrollDirection, Section, SourceArtifact, SourceArtifactKind,
+    TranscriptSegment, TranscriptSegmentRef, Transition, TransitionFrame, TransitionKind,
+    ValidationReport, manifest_path, read_manifest, validate_referenced_files, write_manifest,
 };
+use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 use tracing_subscriber::EnvFilter;
 
@@ -168,6 +170,13 @@ enum Command {
         /// Path to a .scenecast bundle directory.
         bundle: PathBuf,
         /// Output directory for index.html.
+        output: PathBuf,
+    },
+    /// Export a portable editorial draft from transcript-backed scenes.
+    ExportDraft {
+        /// Path to a .scenecast bundle directory.
+        bundle: PathBuf,
+        /// Output directory for draft.json and its referenced screenshots.
         output: PathBuf,
     },
 }
@@ -348,6 +357,7 @@ fn run(cli: Cli) -> Result<()> {
             },
         ),
         Command::ExportHtml { bundle, output } => export_html(&bundle, &output),
+        Command::ExportDraft { bundle, output } => export_draft(&bundle, &output),
     }
 }
 
@@ -804,13 +814,18 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
         kind: SourceArtifactKind::Video,
         label: source_label(&args.input),
         media_type: media_type_for_path(&args.input).map(str::to_owned),
+        transcript_segments: Vec::new(),
     });
-    if let Some((transcript_path, _)) = &transcript {
+    if let Some((transcript_path, candidates)) = &transcript {
         manifest.sources.push(SourceArtifact {
             id: format!("{prefix}-transcript"),
             kind: SourceArtifactKind::Transcript,
             label: source_label(transcript_path),
             media_type: transcript_media_type(transcript_path).map(str::to_owned),
+            transcript_segments: candidates
+                .iter()
+                .flat_map(|candidate| candidate.cues.iter().cloned())
+                .collect(),
         });
     }
 
@@ -842,6 +857,7 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
         let mut evidence = vec![EvidenceRef {
             kind: EvidenceKind::Frame,
             id: format!("{}-frame-{:04}", prefix, index + 1),
+            source_id: Some(source_id.clone()),
             label: Some(
                 candidate
                     .map(|candidate| {
@@ -857,6 +873,7 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
             evidence.extend(candidate.cues.iter().map(|cue| EvidenceRef {
                 kind: EvidenceKind::TranscriptSegment,
                 id: cue.id.clone(),
+                source_id: Some(format!("{prefix}-transcript")),
                 label: Some(cue.text.clone()),
             }));
         }
@@ -869,6 +886,18 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
             ),
             transcript_segment_ids: candidate
                 .map(|candidate| candidate.cues.iter().map(|cue| cue.id.clone()).collect())
+                .unwrap_or_default(),
+            transcript_segments: candidate
+                .map(|candidate| {
+                    candidate
+                        .cues
+                        .iter()
+                        .map(|cue| TranscriptSegmentRef {
+                            source_id: format!("{prefix}-transcript"),
+                            segment_id: cue.id.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
             evidence,
             confidence: Some(if candidate.is_some() { 0.6 } else { 1.0 }),
@@ -927,16 +956,8 @@ fn import_video(bundle: &Path, args: ImportVideoArgs) -> Result<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TranscriptCue {
-    id: String,
-    start_ms: u64,
-    end_ms: u64,
-    text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct TranscriptCandidate {
-    cues: Vec<TranscriptCue>,
+    cues: Vec<TranscriptSegment>,
     start_ms: u64,
     end_ms: u64,
     text: String,
@@ -972,7 +993,7 @@ fn discover_transcript_sidecar(input: &Path, explicit: Option<&Path>) -> Result<
     Ok(None)
 }
 
-fn parse_transcript(path: &Path, prefix: &str) -> Result<Vec<TranscriptCue>> {
+fn parse_transcript(path: &Path, prefix: &str) -> Result<Vec<TranscriptSegment>> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read transcript `{}`", path.display()))?;
     let is_vtt = path
@@ -982,12 +1003,8 @@ fn parse_transcript(path: &Path, prefix: &str) -> Result<Vec<TranscriptCue>> {
     let mut cues = Vec::new();
 
     for block in contents.replace('\r', "").split("\n\n") {
-        let lines = block
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
-        if lines.is_empty() || (is_vtt && lines[0].starts_with("WEBVTT")) {
+        let lines = block.lines().collect::<Vec<_>>();
+        if lines.is_empty() || (is_vtt && lines[0].trim_start().starts_with("WEBVTT")) {
             continue;
         }
         let Some(timing_index) = lines.iter().position(|line| line.contains("-->")) else {
@@ -1017,11 +1034,11 @@ fn parse_transcript(path: &Path, prefix: &str) -> Result<Vec<TranscriptCue>> {
                 path.display()
             );
         }
-        let text = lines[timing_index + 1..].join(" ");
-        if text.is_empty() {
+        let text = lines[timing_index + 1..].join("\n");
+        if text.trim().is_empty() {
             continue;
         }
-        cues.push(TranscriptCue {
+        cues.push(TranscriptSegment {
             id: String::new(),
             start_ms,
             end_ms,
@@ -1059,11 +1076,11 @@ fn parse_timestamp_ms(value: &str) -> Result<u64> {
     Ok((hours * 3_600_000) + (minutes * 60_000) + (seconds * 1000.0).round() as u64)
 }
 
-fn group_transcript_cues(cues: Vec<TranscriptCue>) -> Vec<TranscriptCandidate> {
+fn group_transcript_cues(cues: Vec<TranscriptSegment>) -> Vec<TranscriptCandidate> {
     let mut candidates = Vec::new();
     let mut current = Vec::new();
     for cue in cues {
-        let should_split = current.last().is_some_and(|previous: &TranscriptCue| {
+        let should_split = current.last().is_some_and(|previous: &TranscriptSegment| {
             cue.start_ms.saturating_sub(previous.end_ms) >= TRANSCRIPT_PAUSE_BOUNDARY_MS
                 || cue.end_ms.saturating_sub(current[0].start_ms) > TRANSCRIPT_MAX_DURATION_MS
                 || transcript_text_length(&current) + cue.text.len() > TRANSCRIPT_MAX_TEXT_LENGTH
@@ -1080,7 +1097,7 @@ fn group_transcript_cues(cues: Vec<TranscriptCue>) -> Vec<TranscriptCandidate> {
     candidates
 }
 
-fn transcript_candidate(cues: Vec<TranscriptCue>) -> TranscriptCandidate {
+fn transcript_candidate(cues: Vec<TranscriptSegment>) -> TranscriptCandidate {
     TranscriptCandidate {
         start_ms: cues.first().expect("candidate has cues").start_ms,
         end_ms: cues.last().expect("candidate has cues").end_ms,
@@ -1093,7 +1110,7 @@ fn transcript_candidate(cues: Vec<TranscriptCue>) -> TranscriptCandidate {
     }
 }
 
-fn transcript_text_length(cues: &[TranscriptCue]) -> usize {
+fn transcript_text_length(cues: &[TranscriptSegment]) -> usize {
     cues.iter().map(|cue| cue.text.len()).sum::<usize>() + cues.len().saturating_sub(1)
 }
 
@@ -1246,6 +1263,275 @@ fn export_html(bundle: &Path, output: &Path) -> Result<()> {
 
     println!("Exported {}", index_path.display());
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorialDraft {
+    format: &'static str,
+    schema_version: u32,
+    draft: EditorialDraftMetadata,
+    assets: Vec<EditorialDraftAsset>,
+    scenes: Vec<EditorialDraftScene>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorialDraftMetadata {
+    id: String,
+    title: String,
+    description: Option<String>,
+    source: EditorialDraftSource,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorialDraftSource {
+    system: &'static str,
+    id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorialDraftAsset {
+    id: String,
+    path: String,
+    mime_type: String,
+    sha256: String,
+    #[serde(skip_serializing)]
+    bundle_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorialDraftScene {
+    id: String,
+    start_ms: u64,
+    end_ms: u64,
+    transcript: String,
+    actions: Vec<String>,
+    screenshot_asset_id: String,
+    source_segment_ids: Vec<String>,
+    source_segments: Vec<EditorialDraftTranscriptSegment>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorialDraftTranscriptSegment {
+    source_id: String,
+    id: String,
+    start_ms: u64,
+    end_ms: u64,
+    text: String,
+}
+
+#[instrument(fields(bundle = %bundle.display(), output = %output.display()))]
+fn export_draft(bundle: &Path, output: &Path) -> Result<()> {
+    let manifest = read_manifest(bundle)?;
+    reject_validation_errors("bundle", &manifest.validate())?;
+    let file_report = validate_referenced_files(bundle, &manifest);
+    if !file_report.is_valid() {
+        for missing_file in &file_report.missing_files {
+            eprintln!("error: {missing_file}");
+        }
+        bail!(
+            "bundle has {} missing referenced file(s)",
+            file_report.missing_files.len()
+        );
+    }
+    let transcript_sources = manifest
+        .sources
+        .iter()
+        .map(|source| (source.id.as_str(), source))
+        .collect::<HashMap<_, _>>();
+    let mut scenes = Vec::new();
+    let mut assets = Vec::new();
+    for scene in &manifest.graph.scenes {
+        let Some(provenance) = &scene.provenance else {
+            continue;
+        };
+        if provenance.transcript_segments.is_empty() {
+            continue;
+        }
+        let source_segments = provenance
+            .transcript_segments
+            .iter()
+            .map(|segment_ref| {
+                let source = transcript_sources
+                    .get(segment_ref.source_id.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "scene `{}` references missing transcript source `{}`",
+                            scene.id,
+                            segment_ref.source_id
+                        )
+                    })?;
+                let segment = source
+                    .transcript_segments
+                    .iter()
+                    .find(|segment| segment.id == segment_ref.segment_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "scene `{}` references missing transcript segment `{}`",
+                            scene.id,
+                            segment_ref.segment_id
+                        )
+                    })?;
+                Ok(editorial_transcript_segment(&source.id, segment))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let start_ms = source_segments
+            .iter()
+            .map(|segment| segment.start_ms)
+            .min()
+            .expect("transcript-backed draft scene has transcript segments");
+        let end_ms = source_segments
+            .iter()
+            .map(|segment| segment.end_ms)
+            .max()
+            .expect("transcript-backed draft scene has transcript segments");
+        let screenshot = scene.assets.screenshot.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "transcript-backed draft scene `{}` has no screenshot asset",
+                scene.id
+            )
+        })?;
+        let asset_id = format!("{}-frame", scene.id);
+        let asset_path = draft_asset_path(&asset_id, screenshot);
+        let source_path = bundle.join(screenshot);
+        assets.push(EditorialDraftAsset {
+            id: asset_id.clone(),
+            path: asset_path,
+            mime_type: asset_media_type(&source_path).to_owned(),
+            sha256: sha256_file(&source_path)?,
+            bundle_path: screenshot.to_owned(),
+        });
+        scenes.push(EditorialDraftScene {
+            id: scene.id.as_str().to_owned(),
+            start_ms,
+            end_ms,
+            transcript: source_segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            actions: Vec::new(),
+            screenshot_asset_id: asset_id,
+            source_segment_ids: source_segments
+                .iter()
+                .map(|segment| format!("{}:{}", segment.source_id, segment.id))
+                .collect(),
+            source_segments,
+            notes: scene.notes.clone(),
+        });
+    }
+    if scenes.is_empty() {
+        bail!("bundle contains no transcript-backed draft scenes");
+    }
+
+    let draft = EditorialDraft {
+        format: "editorial-draft",
+        schema_version: 1,
+        draft: EditorialDraftMetadata {
+            id: format!("scenecast-{}", scenes[0].id),
+            title: manifest.title,
+            description: None,
+            source: EditorialDraftSource {
+                system: "scenecast",
+                id: manifest.graph.start_scene.as_str().to_owned(),
+            },
+        },
+        assets,
+        scenes,
+    };
+    fs::create_dir_all(output)
+        .with_context(|| format!("failed to create output directory `{}`", output.display()))?;
+    copy_draft_assets(bundle, output, &draft)?;
+    let draft_path = output.join("draft.json");
+    let contents = serde_json::to_string_pretty(&draft)?;
+    fs::write(&draft_path, format!("{contents}\n"))
+        .with_context(|| format!("failed to write `{}`", draft_path.display()))?;
+    info!(scene_count = draft.scenes.len(), "exported editorial draft");
+
+    println!("Exported {}", draft_path.display());
+    Ok(())
+}
+
+fn editorial_transcript_segment(
+    source_id: &str,
+    segment: &TranscriptSegment,
+) -> EditorialDraftTranscriptSegment {
+    EditorialDraftTranscriptSegment {
+        source_id: source_id.to_owned(),
+        id: segment.id.clone(),
+        start_ms: segment.start_ms,
+        end_ms: segment.end_ms,
+        text: segment.text.clone(),
+    }
+}
+
+fn copy_draft_assets(bundle: &Path, output: &Path, draft: &EditorialDraft) -> Result<()> {
+    for asset in &draft.assets {
+        let source = bundle.join(&asset.bundle_path);
+        let destination = output.join(&asset.path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create `{}`", parent.display()))?;
+        }
+
+        fs::copy(&source, &destination).with_context(|| {
+            format!(
+                "failed to copy `{}` to `{}`",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn draft_asset_path(asset_id: &str, screenshot: &str) -> String {
+    let extension = Path::new(screenshot)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or("png");
+    format!("assets/{asset_id}.{extension}")
+}
+
+fn asset_media_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("gif") => "image/gif",
+        Some("avif") => "image/avif",
+        Some("bmp") => "image/bmp",
+        Some("tif") | Some("tiff") => "image/tiff",
+        Some("png") => "image/png",
+        _ => "application/octet-stream",
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read `{}`", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn source_kind_name(kind: SourceArtifactKind) -> &'static str {
+    match kind {
+        SourceArtifactKind::Video => "video",
+        SourceArtifactKind::Transcript => "transcript",
+        SourceArtifactKind::Trace => "trace",
+        SourceArtifactKind::Manual => "manual",
+        SourceArtifactKind::Other => "other",
+    }
 }
 
 fn copy_referenced_assets(bundle: &Path, output: &Path, manifest: &BundleManifest) -> Result<()> {
@@ -1707,18 +1993,19 @@ fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
         .sources
         .iter()
         .map(|source| {
-            let kind = match source.kind {
-                SourceArtifactKind::Video => "video",
-                SourceArtifactKind::Transcript => "transcript",
-                SourceArtifactKind::Trace => "trace",
-                SourceArtifactKind::Manual => "manual",
-                SourceArtifactKind::Other => "other",
-            };
             json!({
                 "id": source.id,
-                "kind": kind,
+                "kind": source_kind_name(source.kind),
                 "label": source.label,
                 "mediaType": source.media_type,
+                "transcriptSegments": source.transcript_segments.iter().map(|segment| {
+                    json!({
+                        "id": segment.id,
+                        "startMs": segment.start_ms,
+                        "endMs": segment.end_ms,
+                        "text": segment.text,
+                    })
+                }).collect::<Vec<_>>(),
             })
         })
         .collect::<Vec<_>>();
@@ -1794,6 +2081,12 @@ fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
                     "sourceId": provenance.source_id,
                     "timestampMs": provenance.timestamp_ms,
                     "transcriptSegmentIds": provenance.transcript_segment_ids,
+                    "transcriptSegments": provenance.transcript_segments.iter().map(|segment| {
+                        json!({
+                            "sourceId": segment.source_id,
+                            "segmentId": segment.segment_id,
+                        })
+                    }).collect::<Vec<_>>(),
                     "evidence": provenance.evidence.iter().map(|evidence| {
                         let kind = match evidence.kind {
                             EvidenceKind::Frame => "frame",
@@ -1806,6 +2099,7 @@ fn render_player_data(manifest: &BundleManifest) -> serde_json::Value {
                         json!({
                             "kind": kind,
                             "id": evidence.id,
+                            "sourceId": evidence.source_id,
                             "label": evidence.label,
                         })
                     }).collect::<Vec<_>>(),
@@ -1972,21 +2266,36 @@ mod tests {
     }
 
     #[test]
+    fn preserves_multiline_transcript_cue_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("demo.srt");
+        fs::write(
+            &transcript,
+            "1\n00:00:00,000 --> 00:00:01,000\nFirst line.\nSecond line.\n",
+        )
+        .unwrap();
+
+        let cues = parse_transcript(&transcript, "demo").unwrap();
+
+        assert_eq!(cues[0].text, "First line.\nSecond line.");
+    }
+
+    #[test]
     fn groups_cues_at_pause_boundaries() {
         let cues = vec![
-            TranscriptCue {
+            TranscriptSegment {
                 id: "demo-transcript-0001".to_owned(),
                 start_ms: 0,
                 end_ms: 1_000,
                 text: "First cue.".to_owned(),
             },
-            TranscriptCue {
+            TranscriptSegment {
                 id: "demo-transcript-0002".to_owned(),
                 start_ms: 1_200,
                 end_ms: 2_000,
                 text: "Second cue.".to_owned(),
             },
-            TranscriptCue {
+            TranscriptSegment {
                 id: "demo-transcript-0003".to_owned(),
                 start_ms: 4_000,
                 end_ms: 5_000,

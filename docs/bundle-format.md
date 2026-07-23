@@ -120,6 +120,7 @@ The manifest is UTF-8 JSON with schema version `scenecast.bundle.v1`.
 - `description` is optional authored text for search, accessibility, narration, and review. `notes` remain optional presenter or authoring notes.
 - `provenance` is optional scene-level import metadata. It references a source by ID, can record a representative `timestamp_ms`, transcript segment IDs, evidence references, and a confidence value between 0 and 1. Provenance is evidence for review and adapters; it does not create hotspots by itself.
 - Transcript-backed imports add both `video` and `transcript` source artifacts. Their scene descriptions and notes preserve cue text as a reviewable draft; transcript text alone must not be treated as evidence for real clickable UI hotspots.
+- A transcript source can carry `transcript_segments`, each with a stable ID, start/end timestamps in milliseconds, and the original timed text. Scenes can use source-qualified transcript segment references in provenance. This keeps editorial evidence portable even when the original sidecar is not available to a downstream tool.
 - Guide marks are visible non-navigation overlays. Use hotspots when an area should navigate; use guide marks when an area should draw attention without changing scenes.
 
 ## Authoring flow
