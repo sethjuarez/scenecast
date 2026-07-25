@@ -5,7 +5,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use scenecast_core::{
     BundleManifest, GuideMarkId, GuideMarkStyle, HotspotId, InteractionTrigger, SceneId, SceneKind,
-    SourceArtifactKind, manifest_path,
+    SourceArtifactKind, manifest_path, write_manifest,
 };
 use tempfile::tempdir;
 
@@ -598,6 +598,177 @@ fn import_video_links_multiple_frames_as_clickthrough_sequence() {
     assert!(html.contains("\"sources\":[{\"id\":\"clip-source\""));
     assert!(html.contains("\"sourceId\":\"clip-source\""));
     assert!(html.contains("\"timestampMs\":0"));
+    assert!(output.join("captures").join("clip-0001.png").is_file());
+    assert!(output.join("captures").join("clip-0002.png").is_file());
+}
+
+#[test]
+fn import_video_with_srt_sidecar_creates_valid_transcript_draft_and_player_data() {
+    let temp = tempdir().unwrap();
+    let bundle = temp.path().join("demo.scenecast");
+    let output = temp.path().join("player");
+    let draft_output = temp.path().join("editorial-draft");
+    let input = temp.path().join("demo.mp4");
+    fs::write(&input, []).unwrap();
+    fs::write(
+        temp.path().join("demo.srt"),
+        include_str!("fixtures/transcript-video.srt"),
+    )
+    .unwrap();
+    let fake_ffmpeg = write_fake_ffmpeg_sequence(temp.path());
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["new", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .env(
+            "SCENECAST_FAKE_FFMPEG_FRAME_ONE",
+            bundle.join("captures").join("clip-0001.png"),
+        )
+        .env(
+            "SCENECAST_FAKE_FFMPEG_FRAME_TWO",
+            bundle.join("captures").join("clip-0002.png"),
+        )
+        .args([
+            "import-video",
+            bundle.to_str().unwrap(),
+            input.to_str().unwrap(),
+            "--scene-prefix",
+            "clip",
+            "--ffmpeg",
+            fake_ffmpeg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Imported 2 frame scene(s)"));
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["validate", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut manifest: BundleManifest =
+        serde_json::from_str(&fs::read_to_string(manifest_path(&bundle)).unwrap()).unwrap();
+    assert_eq!(manifest.sources.len(), 2);
+    assert_eq!(manifest.sources[1].id, "clip-transcript");
+    assert_eq!(manifest.sources[1].kind, SourceArtifactKind::Transcript);
+    assert_eq!(manifest.sources[1].label, "demo.srt");
+    assert_eq!(manifest.sources[1].transcript_segments.len(), 3);
+    assert_eq!(manifest.sources[1].transcript_segments[0].start_ms, 0);
+    assert_eq!(manifest.sources[1].transcript_segments[0].end_ms, 2_000);
+    assert_eq!(
+        manifest.sources[1].transcript_segments[0].text,
+        "Welcome to the overview."
+    );
+
+    let first = manifest
+        .graph
+        .scene(&SceneId::new("clip-0001").unwrap())
+        .unwrap();
+    assert_eq!(first.title, "clip draft 0001");
+    assert_eq!(first.provenance.as_ref().unwrap().timestamp_ms, Some(2_750));
+    assert_eq!(
+        first.provenance.as_ref().unwrap().transcript_segment_ids,
+        ["clip-transcript-0001", "clip-transcript-0002"]
+    );
+    assert_eq!(
+        first.description.as_deref(),
+        Some("Transcript draft: Welcome to the overview. We begin with the dashboard.")
+    );
+    assert!(
+        first
+            .notes
+            .as_deref()
+            .unwrap()
+            .contains("No clickable UI is inferred")
+    );
+    assert_eq!(
+        first
+            .provenance
+            .as_ref()
+            .unwrap()
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.kind == scenecast_core::EvidenceKind::TranscriptSegment)
+            .count(),
+        2
+    );
+    assert_eq!(first.hotspots.len(), 1);
+    assert_eq!(first.hotspots[0].trigger, InteractionTrigger::Scroll);
+    manifest
+        .graph
+        .scene_mut(&SceneId::new("clip-0001").unwrap())
+        .unwrap()
+        .provenance
+        .as_mut()
+        .unwrap()
+        .transcript_segments
+        .reverse();
+    write_manifest(&bundle, &manifest).unwrap();
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-draft",
+            bundle.to_str().unwrap(),
+            draft_output.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Exported"));
+
+    let draft: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(draft_output.join("draft.json")).unwrap())
+            .unwrap();
+    assert_eq!(draft["format"], "editorial-draft");
+    assert_eq!(draft["schemaVersion"], 1);
+    assert_eq!(draft["draft"]["source"]["system"], "scenecast");
+    assert_eq!(draft["scenes"].as_array().unwrap().len(), 2);
+    assert_eq!(draft["scenes"][0]["id"], "clip-0001");
+    assert_eq!(draft["scenes"][0]["startMs"], 0);
+    assert_eq!(draft["scenes"][0]["endMs"], 5_500);
+    assert!(
+        draft["scenes"][0]["sourceSegments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|segment| segment["text"] == "Welcome to the overview.")
+    );
+    assert_eq!(draft["scenes"][0]["actions"], serde_json::json!([]));
+    assert_eq!(draft["assets"][0]["path"], "assets/clip-0001-frame.png");
+    assert_eq!(draft["assets"][0]["mimeType"], "image/png");
+    assert_eq!(draft["assets"][0]["sha256"].as_str().unwrap().len(), 64);
+    assert!(
+        draft_output
+            .join("assets")
+            .join("clip-0001-frame.png")
+            .is_file()
+    );
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-html",
+            bundle.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let html = fs::read_to_string(output.join("index.html")).unwrap();
+    assert!(html.contains("\"kind\":\"transcript\""));
+    assert!(html.contains("\"id\":\"clip-transcript-0001\""));
+    assert!(html.contains("\"startMs\":0"));
+    assert!(html.contains("\"endMs\":2000"));
+    assert!(html.contains("\"transcriptSegments\":["));
+    assert!(html.contains("\"segmentId\":\"clip-transcript-0001\""));
+    assert!(html.contains("Welcome to the overview."));
+    assert!(html.contains("No clickable UI is inferred from transcript text."));
     assert!(output.join("captures").join("clip-0001.png").is_file());
     assert!(output.join("captures").join("clip-0002.png").is_file());
 }

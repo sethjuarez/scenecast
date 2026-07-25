@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File};
@@ -26,6 +26,12 @@ impl SceneId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSegmentRef {
+    pub source_id: String,
+    pub segment_id: String,
 }
 
 impl fmt::Display for SceneId {
@@ -329,6 +335,16 @@ pub struct SourceArtifact {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript_segments: Vec<TranscriptSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSegment {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -585,6 +601,8 @@ pub struct SceneProvenance {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript_segment_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript_segments: Vec<TranscriptSegmentRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<EvidenceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
@@ -595,6 +613,8 @@ pub struct EvidenceRef {
     #[serde(default)]
     pub kind: EvidenceKind,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
@@ -824,6 +844,30 @@ pub enum ValidationError {
     EmptySourceMediaType {
         source_id: String,
     },
+    InvalidTranscriptSegmentId {
+        source_id: String,
+        segment_id: String,
+        reason: &'static str,
+    },
+    DuplicateTranscriptSegmentId {
+        source_id: String,
+        segment_id: String,
+    },
+    EmptyTranscriptSegmentText {
+        source_id: String,
+        segment_id: String,
+    },
+    InvalidTranscriptSegmentRange {
+        source_id: String,
+        segment_id: String,
+        start_ms: u64,
+        end_ms: u64,
+    },
+    MissingTranscriptSegment {
+        scene_id: SceneId,
+        source_id: String,
+        segment_id: String,
+    },
     MissingProvenanceSource {
         scene_id: SceneId,
         source_id: String,
@@ -950,6 +994,55 @@ impl fmt::Display for ValidationError {
                 write!(
                     formatter,
                     "source `{source_id}` media_type must not be empty when provided"
+                )
+            }
+            Self::InvalidTranscriptSegmentId {
+                source_id,
+                segment_id,
+                reason,
+            } => {
+                write!(
+                    formatter,
+                    "source `{source_id}` transcript segment id `{segment_id}` is not valid: {reason}"
+                )
+            }
+            Self::DuplicateTranscriptSegmentId {
+                source_id,
+                segment_id,
+            } => {
+                write!(
+                    formatter,
+                    "source `{source_id}` transcript segment id `{segment_id}` is duplicated"
+                )
+            }
+            Self::EmptyTranscriptSegmentText {
+                source_id,
+                segment_id,
+            } => {
+                write!(
+                    formatter,
+                    "source `{source_id}` transcript segment `{segment_id}` text must not be empty"
+                )
+            }
+            Self::InvalidTranscriptSegmentRange {
+                source_id,
+                segment_id,
+                start_ms,
+                end_ms,
+            } => {
+                write!(
+                    formatter,
+                    "source `{source_id}` transcript segment `{segment_id}` must end after it starts (got {start_ms}ms..{end_ms}ms)"
+                )
+            }
+            Self::MissingTranscriptSegment {
+                scene_id,
+                source_id,
+                segment_id,
+            } => {
+                write!(
+                    formatter,
+                    "scene `{scene_id}` references missing transcript segment `{segment_id}` from source `{source_id}`"
                 )
             }
             Self::MissingProvenanceSource {
@@ -1129,6 +1222,7 @@ fn validate_sources(sources: &[SourceArtifact]) -> ValidationReport {
     let mut source_ids = HashSet::new();
 
     for source in sources {
+        let mut transcript_segment_ids = HashSet::new();
         if let Err(reason) = validate_identifier(&source.id) {
             report.errors.push(ValidationError::InvalidSourceId {
                 source_id: source.id.clone(),
@@ -1157,6 +1251,44 @@ fn validate_sources(sources: &[SourceArtifact]) -> ValidationReport {
                 source_id: source.id.clone(),
             });
         }
+
+        for segment in &source.transcript_segments {
+            if let Err(reason) = validate_identifier(&segment.id) {
+                report
+                    .errors
+                    .push(ValidationError::InvalidTranscriptSegmentId {
+                        source_id: source.id.clone(),
+                        segment_id: segment.id.clone(),
+                        reason,
+                    });
+            }
+            if !transcript_segment_ids.insert(segment.id.clone()) {
+                report
+                    .errors
+                    .push(ValidationError::DuplicateTranscriptSegmentId {
+                        source_id: source.id.clone(),
+                        segment_id: segment.id.clone(),
+                    });
+            }
+            if segment.text.trim().is_empty() {
+                report
+                    .errors
+                    .push(ValidationError::EmptyTranscriptSegmentText {
+                        source_id: source.id.clone(),
+                        segment_id: segment.id.clone(),
+                    });
+            }
+            if segment.end_ms <= segment.start_ms {
+                report
+                    .errors
+                    .push(ValidationError::InvalidTranscriptSegmentRange {
+                        source_id: source.id.clone(),
+                        segment_id: segment.id.clone(),
+                        start_ms: segment.start_ms,
+                        end_ms: segment.end_ms,
+                    });
+            }
+        }
     }
 
     report
@@ -1168,6 +1300,19 @@ fn validate_scene_provenance(graph: &SceneGraph, sources: &[SourceArtifact]) -> 
         .iter()
         .map(|source| source.id.as_str())
         .collect::<HashSet<_>>();
+    let transcript_segments_by_source = sources
+        .iter()
+        .map(|source| {
+            (
+                source.id.as_str(),
+                source
+                    .transcript_segments
+                    .iter()
+                    .map(|segment| segment.id.as_str())
+                    .collect::<HashSet<_>>(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
 
     for scene in &graph.scenes {
         let Some(provenance) = &scene.provenance else {
@@ -1194,6 +1339,21 @@ fn validate_scene_provenance(graph: &SceneGraph, sources: &[SourceArtifact]) -> 
                 });
         }
 
+        for segment in &provenance.transcript_segments {
+            if !transcript_segments_by_source
+                .get(segment.source_id.as_str())
+                .is_some_and(|segment_ids| segment_ids.contains(segment.segment_id.as_str()))
+            {
+                report
+                    .errors
+                    .push(ValidationError::MissingTranscriptSegment {
+                        scene_id: scene.id.clone(),
+                        source_id: segment.source_id.clone(),
+                        segment_id: segment.segment_id.clone(),
+                    });
+            }
+        }
+
         for evidence in &provenance.evidence {
             if let Err(reason) = validate_identifier(&evidence.id) {
                 report.errors.push(ValidationError::InvalidEvidenceId {
@@ -1201,6 +1361,16 @@ fn validate_scene_provenance(graph: &SceneGraph, sources: &[SourceArtifact]) -> 
                     evidence_id: evidence.id.clone(),
                     reason,
                 });
+            }
+            if let Some(source_id) = &evidence.source_id
+                && !source_ids.contains(source_id.as_str())
+            {
+                report
+                    .errors
+                    .push(ValidationError::MissingProvenanceSource {
+                        scene_id: scene.id.clone(),
+                        source_id: source_id.clone(),
+                    });
             }
         }
     }
@@ -1635,14 +1805,17 @@ mod tests {
             kind: SourceArtifactKind::Video,
             label: "demo.mp4".to_owned(),
             media_type: Some("video/mp4".to_owned()),
+            transcript_segments: Vec::new(),
         });
         manifest.graph.scenes[0].provenance = Some(SceneProvenance {
             source_id: "video-source".to_owned(),
             timestamp_ms: Some(2_500),
             transcript_segment_ids: vec!["seg-1".to_owned()],
+            transcript_segments: Vec::new(),
             evidence: vec![EvidenceRef {
                 kind: EvidenceKind::Frame,
                 id: "frame-0001".to_owned(),
+                source_id: Some("video-source".to_owned()),
                 label: Some("Sampled frame 1".to_owned()),
             }],
             confidence: Some(0.8),
@@ -1686,6 +1859,98 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| matches!(error, ValidationError::InvalidEvidenceId { .. }))
+        );
+    }
+
+    #[test]
+    fn validation_checks_transcript_segments() {
+        let mut manifest = BundleManifest::starter("Demo");
+        manifest.sources.push(SourceArtifact {
+            id: "transcript-source".to_owned(),
+            kind: SourceArtifactKind::Transcript,
+            label: "demo.srt".to_owned(),
+            media_type: Some("application/x-subrip".to_owned()),
+            transcript_segments: vec![TranscriptSegment {
+                id: "segment-0001".to_owned(),
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "Welcome.".to_owned(),
+            }],
+        });
+
+        assert!(manifest.validate().is_valid());
+
+        manifest.sources[0]
+            .transcript_segments
+            .push(TranscriptSegment {
+                id: "segment-0001".to_owned(),
+                start_ms: 1_000,
+                end_ms: 1_000,
+                text: " ".to_owned(),
+            });
+        let report = manifest.validate();
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::DuplicateTranscriptSegmentId { .. }))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::EmptyTranscriptSegmentText { .. }))
+        );
+        assert!(
+            report.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidTranscriptSegmentRange { .. }
+            ))
+        );
+    }
+
+    #[test]
+    fn validation_requires_source_qualified_transcript_segments_to_resolve() {
+        let mut manifest = BundleManifest::starter("Demo");
+        manifest.sources.push(SourceArtifact {
+            id: "transcript-source".to_owned(),
+            kind: SourceArtifactKind::Transcript,
+            label: "demo.srt".to_owned(),
+            media_type: Some("application/x-subrip".to_owned()),
+            transcript_segments: vec![TranscriptSegment {
+                id: "segment-0001".to_owned(),
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "Welcome.".to_owned(),
+            }],
+        });
+        manifest.graph.scenes[0].provenance = Some(SceneProvenance {
+            source_id: "transcript-source".to_owned(),
+            timestamp_ms: Some(500),
+            transcript_segment_ids: vec!["segment-0001".to_owned()],
+            transcript_segments: vec![TranscriptSegmentRef {
+                source_id: "transcript-source".to_owned(),
+                segment_id: "segment-0001".to_owned(),
+            }],
+            evidence: Vec::new(),
+            confidence: Some(1.0),
+        });
+
+        assert!(manifest.validate().is_valid());
+
+        manifest.graph.scenes[0]
+            .provenance
+            .as_mut()
+            .unwrap()
+            .transcript_segments[0]
+            .segment_id = "missing".to_owned();
+        assert!(
+            manifest
+                .validate()
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::MissingTranscriptSegment { .. }))
         );
     }
 
