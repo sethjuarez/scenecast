@@ -22,12 +22,18 @@ cargo run -p scenecast-cli -- add-guide-mark demos\hello.scenecast pricing price
 cargo run -p scenecast-cli -- add-section demos\hello.scenecast overview "Overview" --scenes start,pricing
 cargo run -p scenecast-cli -- import-video demos\hello.scenecast demo.mp4 --scene-prefix demo --every-seconds 5 --crop 0,120,1920,960
 cargo run -p scenecast-cli -- export-html demos\hello.scenecast demos\hello-player
+cargo run -p scenecast-cli -- export-resolved-demo demos\hello.scenecast demos\hello-resolved
 cargo run -p scenecast-cli -- validate demos\hello.scenecast
 ```
 
 The HTML export is a static site: copy the generated folder to GitHub Pages, open
 `index.html`, and use hash routes such as `#/0/0` to deep-link into a section and
 scene.
+
+The resolved-demo export writes `resolved-demo.json`, a machine-readable playback
+timeline for downstream production tools such as CutReady. It preserves bundle-relative
+media paths, ordered steps, guide marks, interaction targets, transition frames, and
+deterministic timing segments.
 
 ## Examples
 

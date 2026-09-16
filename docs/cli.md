@@ -123,6 +123,30 @@ The repository includes `examples\scroll.scenecast` as a complete static scroll 
 cargo run -p scenecast-cli -- export-html examples\scroll.scenecast demos\scroll-player
 ```
 
+## Export a resolved playback contract
+
+```powershell
+cargo run -p scenecast-cli -- export-resolved-demo demos\hello.scenecast demos\hello-resolved
+```
+
+`export-resolved-demo` writes `resolved-demo.json` in the requested output directory
+using the `scenecast.resolved-demo.v1` schema. The file is designed for production
+tools that need Scenecast's canonical playback interpretation without parsing the
+authoring manifest directly.
+
+The export validates the bundle and referenced files, then emits ordered steps,
+bundle-relative screenshot/video references, guide marks, interaction targets,
+transition frames, and deterministic timing segments. Current timing defaults are
+simple and stable: each scene segment holds for 1000ms, click/scroll interactions
+without transition frames hold for 250ms, and transition frame durations come from
+the hotspot transition with a 90ms fallback. Resolved interaction targets always
+include `scrollDirection`, using `any` when the bundle omits it, and resolved
+transition frames always include an explicit `durationMs`.
+
+Video scene references are included in resolved steps for consumers that understand
+video media. Current image/frame-oriented consumers can treat video refs as metadata
+until dedicated video segment handling is added.
+
 ## Validate a bundle
 
 ```powershell

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use predicates::prelude::*;
 use scenecast_core::{
-    BundleManifest, GuideMarkId, GuideMarkStyle, HotspotId, InteractionTrigger, SceneId, SceneKind,
-    SourceArtifactKind, manifest_path, write_manifest,
+    BundleManifest, GuideMarkId, GuideMarkStyle, Hotspot, HotspotId, InteractionTrigger, Rect,
+    Scene, SceneGraph, SceneId, SceneKind, SourceArtifactKind, manifest_path, write_manifest,
 };
 use tempfile::tempdir;
 
@@ -856,6 +856,355 @@ fn export_html_writes_clickthrough_player_and_assets() {
     assert!(html.contains("\"trigger\":\"scroll\""));
     assert!(html.contains("\"kind\":\"frame-sequence\""));
     assert!(output.join("captures").join("pricing.png").is_file());
+}
+
+#[test]
+fn export_resolved_demo_writes_cutready_playback_contract() {
+    let temp = tempdir().unwrap();
+    let bundle = temp.path().join("demo.scenecast");
+    let output = temp.path().join("resolved");
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["new", bundle.to_str().unwrap(), "--title", "Demo"])
+        .assert()
+        .success();
+    fs::write(bundle.join("captures").join("pricing.png"), []).unwrap();
+    fs::write(bundle.join("captures").join("scroll-0001.png"), []).unwrap();
+    fs::write(bundle.join("captures").join("scroll-0002.png"), []).unwrap();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-scene",
+            bundle.to_str().unwrap(),
+            "pricing",
+            "Pricing",
+            "--screenshot",
+            "captures/pricing.png",
+            "--description",
+            "Pricing page.",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-guide-mark",
+            bundle.to_str().unwrap(),
+            "pricing",
+            "price-guide",
+            "Price cards",
+            "--x",
+            "8",
+            "--y",
+            "9",
+            "--width",
+            "10",
+            "--height",
+            "11",
+            "--style",
+            "highlight",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-hotspot",
+            bundle.to_str().unwrap(),
+            "start",
+            "pricing-link",
+            "View pricing",
+            "pricing",
+            "--x",
+            "420",
+            "--y",
+            "240",
+            "--width",
+            "160",
+            "--height",
+            "48",
+            "--trigger",
+            "scroll",
+            "--scroll-direction",
+            "down",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-transition",
+            bundle.to_str().unwrap(),
+            "start",
+            "pricing-link",
+            "--frames",
+            "captures/scroll-0001.png,captures/scroll-0002.png",
+            "--frame-duration-ms",
+            "120",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-resolved-demo",
+            bundle.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("resolved-demo.json"));
+
+    let resolved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join("resolved-demo.json")).unwrap())
+            .unwrap();
+    assert_eq!(resolved["schemaVersion"], "scenecast.resolved-demo.v1");
+    assert_eq!(resolved["startSceneId"], "start");
+    assert_eq!(resolved["capturePolicy"]["assetBase"], "bundle-relative");
+    assert_eq!(resolved["steps"][0]["id"], "step-start");
+    assert_eq!(resolved["steps"][0]["order"], 0);
+    assert_eq!(
+        resolved["steps"][0]["targets"][0]["targetSceneId"],
+        "pricing"
+    );
+    assert_eq!(resolved["steps"][0]["targets"][0]["trigger"], "scroll");
+    assert_eq!(
+        resolved["steps"][0]["targets"][0]["scrollDirection"],
+        "down"
+    );
+    assert_eq!(resolved["steps"][1]["guideMarks"][0]["style"], "highlight");
+    assert_eq!(resolved["segments"][0]["kind"], "scene");
+    assert_eq!(resolved["segments"][1]["kind"], "transition");
+    assert_eq!(
+        resolved["segments"][1]["frames"][0]["path"],
+        "captures/scroll-0001.png"
+    );
+    assert_eq!(resolved["segments"][1]["frames"][0]["durationMs"], 120);
+    assert_eq!(resolved["segments"][1]["interaction"]["id"], "pricing-link");
+    assert_eq!(resolved["diagnostics"][0]["severity"], "warning");
+    assert_eq!(resolved["diagnostics"][0]["code"], "scene_has_no_capture");
+    assert_eq!(resolved["diagnostics"][0]["sceneId"], "start");
+}
+
+#[test]
+fn export_resolved_demo_orders_steps_from_start_scene() {
+    let temp = tempdir().unwrap();
+    let bundle = temp.path().join("demo.scenecast");
+    fs::create_dir_all(bundle.join("captures")).unwrap();
+    fs::create_dir_all(bundle.join("assets")).unwrap();
+    fs::write(bundle.join("captures").join("intro.png"), []).unwrap();
+    fs::write(bundle.join("captures").join("start.png"), []).unwrap();
+    fs::write(bundle.join("captures").join("pricing.png"), []).unwrap();
+
+    let intro = Scene::screenshot(
+        SceneId::new("intro").unwrap(),
+        "Intro",
+        Some("captures/intro.png".to_string()),
+    );
+    let mut start = Scene::screenshot(
+        SceneId::new("start").unwrap(),
+        "Start",
+        Some("captures/start.png".to_string()),
+    );
+    start.hotspots.push(Hotspot::new(
+        HotspotId::new("pricing-link").unwrap(),
+        "View pricing",
+        SceneId::new("pricing").unwrap(),
+        Rect::new(1.0, 2.0, 3.0, 4.0),
+    ));
+    let pricing = Scene::screenshot(
+        SceneId::new("pricing").unwrap(),
+        "Pricing",
+        Some("captures/pricing.png".to_string()),
+    );
+    let manifest = BundleManifest {
+        schema_version: "scenecast.bundle.v1".to_string(),
+        title: "Demo".to_string(),
+        sections: Vec::new(),
+        graph: SceneGraph {
+            start_scene: SceneId::new("start").unwrap(),
+            scenes: vec![intro, start, pricing],
+        },
+        sources: Vec::new(),
+        assets: Vec::new(),
+    };
+    write_manifest(&bundle, &manifest).unwrap();
+
+    let output = temp.path().join("resolved");
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-resolved-demo",
+            bundle.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let resolved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join("resolved-demo.json")).unwrap())
+            .unwrap();
+    assert_eq!(resolved["steps"][0]["sceneId"], "start");
+    assert_eq!(resolved["steps"][1]["sceneId"], "pricing");
+    assert_eq!(resolved["steps"][2]["sceneId"], "intro");
+    assert_eq!(resolved["segments"][0]["stepId"], "step-start");
+    assert_eq!(resolved["segments"][1]["interaction"]["id"], "pricing-link");
+    assert_eq!(resolved["segments"][2]["stepId"], "step-pricing");
+    assert_eq!(resolved["segments"][3]["stepId"], "step-intro");
+}
+
+#[test]
+fn export_resolved_demo_keeps_branch_targets_out_of_linear_segments() {
+    let temp = tempdir().unwrap();
+    let bundle = temp.path().join("demo.scenecast");
+    fs::create_dir_all(bundle.join("captures")).unwrap();
+    fs::create_dir_all(bundle.join("assets")).unwrap();
+    fs::write(bundle.join("captures").join("start.png"), []).unwrap();
+    fs::write(bundle.join("captures").join("pricing.png"), []).unwrap();
+    fs::write(bundle.join("captures").join("docs.png"), []).unwrap();
+
+    let mut start = Scene::screenshot(
+        SceneId::new("start").unwrap(),
+        "Start",
+        Some("captures/start.png".to_string()),
+    );
+    start.hotspots.push(Hotspot::new(
+        HotspotId::new("pricing-link").unwrap(),
+        "View pricing",
+        SceneId::new("pricing").unwrap(),
+        Rect::new(1.0, 2.0, 3.0, 4.0),
+    ));
+    start.hotspots.push(Hotspot::new(
+        HotspotId::new("docs-link").unwrap(),
+        "Read docs",
+        SceneId::new("docs").unwrap(),
+        Rect::new(5.0, 6.0, 7.0, 8.0),
+    ));
+    let pricing = Scene::screenshot(
+        SceneId::new("pricing").unwrap(),
+        "Pricing",
+        Some("captures/pricing.png".to_string()),
+    );
+    let docs = Scene::screenshot(
+        SceneId::new("docs").unwrap(),
+        "Docs",
+        Some("captures/docs.png".to_string()),
+    );
+    let manifest = BundleManifest {
+        schema_version: "scenecast.bundle.v1".to_string(),
+        title: "Demo".to_string(),
+        sections: Vec::new(),
+        graph: SceneGraph {
+            start_scene: SceneId::new("start").unwrap(),
+            scenes: vec![start, pricing, docs],
+        },
+        sources: Vec::new(),
+        assets: Vec::new(),
+    };
+    write_manifest(&bundle, &manifest).unwrap();
+
+    let output = temp.path().join("resolved");
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-resolved-demo",
+            bundle.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let resolved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join("resolved-demo.json")).unwrap())
+            .unwrap();
+    assert_eq!(resolved["steps"][0]["targets"].as_array().unwrap().len(), 2);
+    assert_eq!(resolved["steps"][0]["targets"][0]["id"], "pricing-link");
+    assert_eq!(resolved["steps"][0]["targets"][1]["id"], "docs-link");
+    let segment_interactions = resolved["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|segment| segment["interaction"]["id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(segment_interactions, vec!["pricing-link"]);
+}
+
+#[test]
+fn export_resolved_demo_expands_required_interaction_defaults() {
+    let temp = tempdir().unwrap();
+    let bundle = temp.path().join("demo.scenecast");
+    let output = temp.path().join("resolved");
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args(["new", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    fs::write(bundle.join("captures").join("pricing.png"), []).unwrap();
+    fs::write(bundle.join("captures").join("transition.png"), []).unwrap();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-scene",
+            bundle.to_str().unwrap(),
+            "pricing",
+            "Pricing",
+            "--screenshot",
+            "captures/pricing.png",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-hotspot",
+            bundle.to_str().unwrap(),
+            "start",
+            "pricing-link",
+            "View pricing",
+            "pricing",
+            "--x",
+            "1",
+            "--y",
+            "2",
+            "--width",
+            "3",
+            "--height",
+            "4",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "add-transition",
+            bundle.to_str().unwrap(),
+            "start",
+            "pricing-link",
+            "--frames",
+            "captures/transition.png",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("scenecast-cli")
+        .unwrap()
+        .args([
+            "export-resolved-demo",
+            bundle.to_str().unwrap(),
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let resolved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join("resolved-demo.json")).unwrap())
+            .unwrap();
+    assert_eq!(resolved["steps"][0]["targets"][0]["trigger"], "click");
+    assert_eq!(resolved["steps"][0]["targets"][0]["scrollDirection"], "any");
+    assert_eq!(resolved["segments"][1]["frames"][0]["durationMs"], 90);
 }
 
 #[test]

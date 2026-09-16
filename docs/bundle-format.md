@@ -143,3 +143,39 @@ CLI edit commands reject validation errors introduced by the requested edit, but
 ## Static publishing
 
 `export-html` produces a static player folder that can be copied directly to GitHub Pages. The player uses relative bundle paths, so the same output works under a repository root, a `docs/` subdirectory, or a `gh-pages` branch. Hash routes such as `#/0/0` are used for section/scene deep links so static hosting does not need server-side rewrites.
+
+## Resolved playback export
+
+`export-resolved-demo` produces a machine-readable `resolved-demo.json` file for
+downstream production tools that need Scenecast's canonical playback interpretation.
+The resolved shape uses schema version `scenecast.resolved-demo.v1` and camelCase
+property names:
+
+```json
+{
+  "schemaVersion": "scenecast.resolved-demo.v1",
+  "title": "Product demo",
+  "startSceneId": "start",
+  "capturePolicy": {
+    "kind": "reference-existing-assets",
+    "assetBase": "bundle-relative",
+    "missingCaptureBehavior": "diagnostic"
+  },
+  "steps": [],
+  "segments": [],
+  "diagnostics": []
+}
+```
+
+Each step corresponds to a resolved scene and includes ordered media references,
+guide marks, and interaction targets. Each segment describes the deterministic
+playback timeline for scenes, interactions, and transition frames. Media and frame
+paths remain bundle-relative so consumers can resolve them from the source bundle
+without copying assets into the resolved output directory. Resolved interaction
+targets expand defaults such as `scrollDirection: "any"`, and every resolved
+transition frame includes an explicit `durationMs`.
+
+Video scene references can appear in resolved steps, but v1 scene timing uses
+deterministic default holds rather than probing video duration. Image/frame-oriented
+consumers should treat video references as metadata until they implement dedicated
+video segment handling.

@@ -10,7 +10,8 @@ use scenecast_core::{
     HotspotId, InteractionTrigger, MANIFEST_FILE_NAME, Rect, Scene, SceneId, SceneKind,
     SceneProvenance, ScrollDirection, Section, SourceArtifact, SourceArtifactKind,
     TranscriptSegment, TranscriptSegmentRef, Transition, TransitionFrame, TransitionKind,
-    ValidationReport, manifest_path, read_manifest, validate_referenced_files, write_manifest,
+    ValidationReport, ValidationWarning, manifest_path, read_manifest, validate_referenced_files,
+    write_manifest,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -170,6 +171,13 @@ enum Command {
         /// Path to a .scenecast bundle directory.
         bundle: PathBuf,
         /// Output directory for index.html.
+        output: PathBuf,
+    },
+    /// Export a resolved playback timeline for downstream production tools.
+    ExportResolvedDemo {
+        /// Path to a .scenecast bundle directory.
+        bundle: PathBuf,
+        /// Output directory for resolved-demo.json.
         output: PathBuf,
     },
     /// Export a portable editorial draft from transcript-backed scenes.
@@ -357,6 +365,7 @@ fn run(cli: Cli) -> Result<()> {
             },
         ),
         Command::ExportHtml { bundle, output } => export_html(&bundle, &output),
+        Command::ExportResolvedDemo { bundle, output } => export_resolved_demo(&bundle, &output),
         Command::ExportDraft { bundle, output } => export_draft(&bundle, &output),
     }
 }
@@ -1262,6 +1271,38 @@ fn export_html(bundle: &Path, output: &Path) -> Result<()> {
         .with_context(|| format!("failed to write `{}`", index_path.display()))?;
 
     println!("Exported {}", index_path.display());
+    Ok(())
+}
+
+#[instrument(fields(bundle = %bundle.display(), output = %output.display()))]
+fn export_resolved_demo(bundle: &Path, output: &Path) -> Result<()> {
+    let manifest = read_manifest(bundle)?;
+    let report = manifest.validate();
+    let file_report = validate_referenced_files(bundle, &manifest);
+    reject_validation_errors("bundle", &report)?;
+    if !file_report.is_valid() {
+        for missing_file in &file_report.missing_files {
+            eprintln!("error: {missing_file}");
+        }
+        bail!(
+            "bundle has {} missing referenced file(s)",
+            file_report.missing_files.len()
+        );
+    }
+
+    fs::create_dir_all(output).with_context(|| {
+        format!(
+            "failed to create resolved demo output directory `{}`",
+            output.display()
+        )
+    })?;
+    let resolved = render_resolved_demo(&manifest);
+    let resolved_path = output.join("resolved-demo.json");
+    let contents = serde_json::to_string_pretty(&resolved)?;
+    fs::write(&resolved_path, format!("{contents}\n"))
+        .with_context(|| format!("failed to write `{}`", resolved_path.display()))?;
+
+    println!("Exported {}", resolved_path.display());
     Ok(())
 }
 
@@ -2197,6 +2238,258 @@ fn script_safe_json(value: &serde_json::Value) -> String {
     serde_json::to_string(value)
         .expect("player data is serializable")
         .replace("</script", "<\\/script")
+}
+
+fn render_resolved_demo(manifest: &BundleManifest) -> serde_json::Value {
+    let mut segments = Vec::new();
+    let mut current_ms = 0_u64;
+    let scene_order = resolved_scene_order(manifest);
+    let scenes = scene_order
+        .iter()
+        .filter_map(|scene_id| {
+            manifest
+                .graph
+                .scenes
+                .iter()
+                .find(|scene| scene.id.as_str() == scene_id)
+        })
+        .collect::<Vec<_>>();
+
+    let steps = scenes
+        .iter()
+        .enumerate()
+        .map(|(order, scene)| {
+            let step_id = resolved_step_id(scene.id.as_str());
+            let scene_duration_ms = 1_000_u64;
+            let scene_start_ms = current_ms;
+            current_ms += scene_duration_ms;
+            segments.push(json!({
+                "id": resolved_segment_id(segments.len(), scene.id.as_str(), "scene"),
+                "kind": "scene",
+                "stepId": step_id,
+                "startMs": scene_start_ms,
+                "durationMs": scene_duration_ms,
+                "endMs": current_ms,
+                "capture": resolved_capture_ref(scene),
+                "interaction": null,
+                "frames": [],
+                "waitMs": 0,
+            }));
+
+            let targets = scene
+                .hotspots
+                .iter()
+                .map(resolved_interaction_target)
+                .collect::<Vec<_>>();
+
+            if let Some(hotspot) = scenes
+                .get(order + 1)
+                .and_then(|next_scene| primary_hotspot_to(scene, next_scene.id.as_str()))
+            {
+                let frames = resolved_transition_frames(hotspot);
+                let default_wait_ms = if frames.is_empty() { 250 } else { 0 };
+                let frame_duration_ms = frames
+                    .iter()
+                    .filter_map(|frame| frame.get("durationMs").and_then(serde_json::Value::as_u64))
+                    .sum::<u64>();
+                let duration_ms = (default_wait_ms + frame_duration_ms).max(1);
+                let start_ms = current_ms;
+                current_ms += duration_ms;
+                segments.push(json!({
+                    "id": resolved_segment_id(segments.len(), scene.id.as_str(), hotspot.id.as_str()),
+                    "kind": if frames.is_empty() { "wait" } else { "transition" },
+                    "stepId": step_id,
+                    "startMs": start_ms,
+                    "durationMs": duration_ms,
+                    "endMs": current_ms,
+                    "capture": null,
+                    "interaction": resolved_interaction_target(hotspot),
+                    "frames": frames,
+                    "waitMs": default_wait_ms,
+                }));
+            }
+
+            json!({
+                "id": step_id,
+                "order": order,
+                "sceneId": scene.id.as_str(),
+                "title": scene.title,
+                "description": scene.description,
+                "notes": scene.notes,
+                "screenshot": scene.assets.screenshot.as_ref().map(|path| json!({ "path": path })),
+                "video": scene.assets.video.as_ref().map(|path| json!({ "path": path })),
+                "guideMarks": scene.guide_marks.iter().map(resolved_guide_mark).collect::<Vec<_>>(),
+                "targets": targets,
+            })
+        })
+        .collect::<Vec<_>>();
+    let diagnostics = manifest
+        .validate()
+        .warnings
+        .iter()
+        .map(resolved_diagnostic)
+        .collect::<Vec<_>>();
+
+    json!({
+        "schemaVersion": "scenecast.resolved-demo.v1",
+        "title": manifest.title,
+        "startSceneId": manifest.graph.start_scene.as_str(),
+        "capturePolicy": {
+            "kind": "reference-existing-assets",
+            "assetBase": "bundle-relative",
+            "missingCaptureBehavior": "diagnostic",
+        },
+        "sceneOrder": scene_order,
+        "sections": export_sections(manifest, &scene_order),
+        "steps": steps,
+        "segments": segments,
+        "diagnostics": diagnostics,
+    })
+}
+
+fn resolved_scene_order(manifest: &BundleManifest) -> Vec<String> {
+    let mut ordered = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current_scene_id = manifest.graph.start_scene.as_str().to_owned();
+
+    while visited.insert(current_scene_id.clone()) {
+        ordered.push(current_scene_id.clone());
+        let Some(scene) = manifest
+            .graph
+            .scenes
+            .iter()
+            .find(|scene| scene.id.as_str() == current_scene_id)
+        else {
+            break;
+        };
+        let Some(next) = scene.hotspots.first() else {
+            break;
+        };
+        current_scene_id = next.target.as_str().to_owned();
+    }
+
+    for scene in &manifest.graph.scenes {
+        if visited.insert(scene.id.as_str().to_owned()) {
+            ordered.push(scene.id.as_str().to_owned());
+        }
+    }
+
+    ordered
+}
+
+fn resolved_step_id(scene_id: &str) -> String {
+    format!("step-{scene_id}")
+}
+
+fn resolved_segment_id(index: usize, scene_id: &str, suffix: &str) -> String {
+    format!("segment-{index:04}-{scene_id}-{suffix}")
+}
+
+fn primary_hotspot_to<'a>(scene: &'a Scene, target_scene_id: &str) -> Option<&'a Hotspot> {
+    scene
+        .hotspots
+        .iter()
+        .find(|hotspot| hotspot.target.as_str() == target_scene_id)
+}
+
+fn resolved_capture_ref(scene: &Scene) -> Option<serde_json::Value> {
+    scene
+        .assets
+        .screenshot
+        .as_ref()
+        .or(scene.assets.video.as_ref())
+        .map(|path| json!({ "path": path }))
+}
+
+fn resolved_transition_frames(hotspot: &Hotspot) -> Vec<serde_json::Value> {
+    let default_duration_ms = hotspot
+        .transition
+        .as_ref()
+        .and_then(|transition| transition.default_frame_duration_ms)
+        .unwrap_or(90);
+
+    hotspot
+        .transition
+        .as_ref()
+        .map(|transition| {
+            transition
+                .frames
+                .iter()
+                .map(|frame| {
+                    json!({
+                        "path": frame.path,
+                        "durationMs": frame.duration_ms.unwrap_or(default_duration_ms),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn resolved_interaction_target(hotspot: &Hotspot) -> serde_json::Value {
+    json!({
+        "id": hotspot.id.as_str(),
+        "label": hotspot.label,
+        "targetSceneId": hotspot.target.as_str(),
+        "trigger": interaction_trigger_name(hotspot.trigger),
+        "scrollDirection": scroll_direction_name(hotspot.scroll_direction),
+        "bounds": resolved_rect(hotspot.bounds),
+        "selectors": [],
+    })
+}
+
+fn resolved_guide_mark(guide_mark: &GuideMark) -> serde_json::Value {
+    json!({
+        "id": guide_mark.id.as_str(),
+        "label": guide_mark.label,
+        "bounds": resolved_rect(guide_mark.bounds),
+        "style": guide_mark_style_name(guide_mark.style),
+    })
+}
+
+fn resolved_rect(bounds: Rect) -> serde_json::Value {
+    json!({
+        "x": bounds.x,
+        "y": bounds.y,
+        "width": bounds.width,
+        "height": bounds.height,
+    })
+}
+
+fn interaction_trigger_name(trigger: InteractionTrigger) -> &'static str {
+    match trigger {
+        InteractionTrigger::Click => "click",
+        InteractionTrigger::Scroll => "scroll",
+    }
+}
+
+fn scroll_direction_name(direction: ScrollDirection) -> &'static str {
+    match direction {
+        ScrollDirection::Any => "any",
+        ScrollDirection::Down => "down",
+        ScrollDirection::Up => "up",
+    }
+}
+
+fn guide_mark_style_name(style: GuideMarkStyle) -> &'static str {
+    match style {
+        GuideMarkStyle::Pulse => "pulse",
+        GuideMarkStyle::Ring => "ring",
+        GuideMarkStyle::Highlight => "highlight",
+    }
+}
+
+fn resolved_diagnostic(warning: &ValidationWarning) -> serde_json::Value {
+    match warning {
+        ValidationWarning::SceneHasNoCapture { scene_id } => json!({
+            "severity": "warning",
+            "code": "scene_has_no_capture",
+            "message": warning.to_string(),
+            "sceneId": scene_id.as_str(),
+            "targetId": null,
+            "path": null,
+        }),
+    }
 }
 
 fn reject_introduced_errors(
